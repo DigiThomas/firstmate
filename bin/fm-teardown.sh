@@ -1135,34 +1135,53 @@ teardown_release_herdr_lock() {
   fi
 }
 if [ "$BACKEND" = herdr ]; then
-  fm_backend_source herdr || true
+  if ! fm_backend_source herdr; then
+    echo "error: herdr teardown prerequisites are unavailable for $ID; nothing was changed - restore the adapter and rerun teardown" >&2
+    exit 1
+  fi
+  for TEARDOWN_HERDR_PREREQUISITE in \
+    fm_backend_herdr_parse_target \
+    fm_backend_herdr_pane_presence_state \
+    fm_backend_herdr_endpoint_confirmed_gone \
+    fm_backend_herdr_presentation_session_lock_path; do
+    if ! declare -F "$TEARDOWN_HERDR_PREREQUISITE" >/dev/null 2>&1; then
+      echo "error: herdr teardown prerequisites are unavailable for $ID; nothing was changed - restore the adapter and rerun teardown" >&2
+      exit 1
+    fi
+  done
   if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
     # shellcheck source=bin/fm-wake-lib.sh
     . "$SCRIPT_DIR/fm-wake-lib.sh"
   fi
-  if declare -F fm_backend_herdr_parse_target >/dev/null 2>&1 \
-    && fm_backend_herdr_parse_target "$T"; then
-    TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
-    TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
-    if ! TEARDOWN_HERDR_LOCK=$(fm_backend_herdr_presentation_session_lock_path "$TEARDOWN_HERDR_SESSION"); then
-      echo "error: herdr session presentation lock could not be resolved for $ID; nothing was changed - rerun teardown once the session is reachable and unambiguous" >&2
-      exit 1
-    fi
-    TEARDOWN_HERDR_LOCK_ATTEMPT=0
-    while [ "$TEARDOWN_HERDR_LOCK_ATTEMPT" -lt 50 ]; do
-      if fm_lock_try_acquire "$TEARDOWN_HERDR_LOCK"; then
-        TEARDOWN_HERDR_LOCK_HELD=1
-        break
-      fi
-      sleep 0.1
-      TEARDOWN_HERDR_LOCK_ATTEMPT=$((TEARDOWN_HERDR_LOCK_ATTEMPT + 1))
-    done
-    if [ "$TEARDOWN_HERDR_LOCK_HELD" != 1 ]; then
-      echo "error: herdr session presentation lock is contended for $ID; nothing was changed - rerun teardown once the contention clears" >&2
-      exit 1
-    fi
-    trap teardown_release_herdr_lock EXIT
+  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1 \
+    || ! declare -F fm_lock_release >/dev/null 2>&1; then
+    echo "error: herdr teardown lock machinery is unavailable for $ID; nothing was changed - restore the lock support and rerun teardown" >&2
+    exit 1
   fi
+  if ! fm_backend_herdr_parse_target "$T"; then
+    echo "error: herdr endpoint $T for $ID could not be parsed exactly; nothing was changed - repair the endpoint metadata and rerun teardown" >&2
+    exit 1
+  fi
+  TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
+  TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
+  if ! TEARDOWN_HERDR_LOCK=$(fm_backend_herdr_presentation_session_lock_path "$TEARDOWN_HERDR_SESSION"); then
+    echo "error: herdr session presentation lock could not be resolved for $ID; nothing was changed - rerun teardown once the session is reachable and unambiguous" >&2
+    exit 1
+  fi
+  TEARDOWN_HERDR_LOCK_ATTEMPT=0
+  while [ "$TEARDOWN_HERDR_LOCK_ATTEMPT" -lt 50 ]; do
+    if fm_lock_try_acquire "$TEARDOWN_HERDR_LOCK"; then
+      TEARDOWN_HERDR_LOCK_HELD=1
+      break
+    fi
+    sleep 0.1
+    TEARDOWN_HERDR_LOCK_ATTEMPT=$((TEARDOWN_HERDR_LOCK_ATTEMPT + 1))
+  done
+  if [ "$TEARDOWN_HERDR_LOCK_HELD" != 1 ]; then
+    echo "error: herdr session presentation lock is contended for $ID; nothing was changed - rerun teardown once the contention clears" >&2
+    exit 1
+  fi
+  trap teardown_release_herdr_lock EXIT
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.

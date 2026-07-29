@@ -1438,9 +1438,9 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
   pass "herdr flat teardown never erases records when pane presence is unparseable"
 }
 
-test_herdr_flat_teardown_refuses_before_changes_on_unresolvable_lock() {
-  local case_dir log closed rc thlog
-  case_dir=$(make_case herdr-unresolvable-lock)
+assert_herdr_teardown_preflight_refuses_before_changes() {
+  local mode=$1 case_dir log closed rc thlog teardown_bin
+  case_dir=$(make_case "herdr-preflight-$mode")
   write_meta "$case_dir" local-only ship
   configure_flat_herdr_teardown_case "$case_dir"
   log="$case_dir/herdr.log"; : > "$log"
@@ -1455,24 +1455,48 @@ exit 0
 SH
   chmod +x "$case_dir/fakebin/treehouse"
 
+  teardown_bin=$TEARDOWN
+  case "$mode" in
+    missing-adapter|missing-parser)
+      mkdir -p "$case_dir/test-root"
+      cp -R "$ROOT/bin" "$case_dir/test-root/bin"
+      if [ "$mode" = missing-adapter ]; then
+        rm -f "$case_dir/test-root/bin/backends/herdr.sh"
+      else
+        sed -i.bak 's/^fm_backend_herdr_parse_target()/fm_backend_herdr_parse_target_unavailable()/' \
+          "$case_dir/test-root/bin/backends/herdr.sh"
+        rm -f "$case_dir/test-root/bin/backends/herdr.sh.bak"
+      fi
+      teardown_bin="$case_dir/test-root/bin/fm-teardown.sh"
+      ;;
+  esac
   rc=0
-  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_SESSION_LIST_GARBAGE=1 \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  [ "$rc" -ne 0 ] || fail "herdr-unresolvable-lock: teardown continued without the required presentation lock"
-  assert_grep "presentation lock could not be resolved" "$case_dir/stderr" \
-    "herdr-unresolvable-lock: the retryable pre-return refusal was not explained visibly"
-  [ -d "$case_dir/wt" ] || fail "herdr-unresolvable-lock: refusal removed the isolated copy"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    FM_FAKE_HERDR_SESSION_LIST_GARBAGE="$([ "$mode" = unresolvable-lock ] && printf 1 || printf 0)" \
+    PATH="$case_dir/fakebin:$PATH" \
+    "$teardown_bin" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "herdr-preflight-$mode: teardown continued without its required preflight"
+  assert_grep "nothing was changed" "$case_dir/stderr" \
+    "herdr-preflight-$mode: the retryable pre-return refusal was not explained visibly"
+  [ -d "$case_dir/wt" ] || fail "herdr-preflight-$mode: refusal removed the isolated copy"
   [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "fm/task-x1" ] \
-    || fail "herdr-unresolvable-lock: refusal dropped the task branch"
+    || fail "herdr-preflight-$mode: refusal dropped the task branch"
   [ -e "$case_dir/state/task-x1.meta" ] \
-    || fail "herdr-unresolvable-lock: refusal erased the durable endpoint metadata"
+    || fail "herdr-preflight-$mode: refusal erased the durable endpoint metadata"
   [ -e "$case_dir/state/task-x1.status" ] \
-    || fail "herdr-unresolvable-lock: refusal erased the task status record"
+    || fail "herdr-preflight-$mode: refusal erased the task status record"
   [ -e "$case_dir/state/task-x1.turn-ended" ] \
-    || fail "herdr-unresolvable-lock: refusal erased the turn-end record"
-  [ ! -s "$thlog" ] || fail "herdr-unresolvable-lock: refusal returned the isolated copy"
-  [ ! -e "$closed" ] || fail "herdr-unresolvable-lock: refusal attempted an unlocked pane close"
-  pass "herdr flat teardown refuses before every destructive change when its presentation lock is unresolvable"
+    || fail "herdr-preflight-$mode: refusal erased the turn-end record"
+  [ ! -s "$thlog" ] || fail "herdr-preflight-$mode: refusal returned the isolated copy"
+  [ ! -e "$closed" ] || fail "herdr-preflight-$mode: refusal attempted an unlocked pane close"
+}
+
+test_herdr_flat_teardown_preflight_refuses_before_changes() {
+  assert_herdr_teardown_preflight_refuses_before_changes unresolvable-lock
+  assert_herdr_teardown_preflight_refuses_before_changes missing-adapter
+  assert_herdr_teardown_preflight_refuses_before_changes missing-parser
+  pass "herdr flat teardown preflight refuses before every destructive change"
 }
 
 configure_herdr_projection_teardown_case() {  # <case-dir>
@@ -1606,7 +1630,7 @@ test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
-test_herdr_flat_teardown_refuses_before_changes_on_unresolvable_lock
+test_herdr_flat_teardown_preflight_refuses_before_changes
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_squash_merged_branch_deleted_allows

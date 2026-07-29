@@ -695,8 +695,9 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
   # The emptying-close plan's tab list proves the seeded prune is NOT
   # workspace-emptying (the task tab remains), so the close stays plain.
   printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/7.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/9.out"
-  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/10.out"
+  printf '{"error":{"code":"pane_not_found"}}\n' > "$resp/9.out"
+  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/10.out"
+  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/11.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
     bash -c '
@@ -739,8 +740,9 @@ test_projection_create_never_closes_a_concurrent_same_label_tab() {
   printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/5.out"
   printf '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}\n' > "$resp/6.out"
   printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/7.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/9.out"
-  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"},{"pane_id":"w9:p3","tab_id":"w9:t3"}]}}\n' > "$resp/10.out"
+  printf '{"error":{"code":"pane_not_found"}}\n' > "$resp/9.out"
+  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/10.out"
+  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"},{"pane_id":"w9:p3","tab_id":"w9:t3"}]}}\n' > "$resp/11.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "captain-ws\tcaptain-tab"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_create_task /tmp/proj label fm-task-p2' "$ROOT" 2>&1)
@@ -779,12 +781,13 @@ test_projection_close_restores_exact_prior_focus() {
   # The emptying-close plan sees a second tab in w9, so the close stays plain
   # and the exact-tab restore backstop is what reclaims the stolen focus.
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","workspace_id":"w9"},{"tab_id":"w9:t2","workspace_id":"w9"}]}}' > "$resp/4.out"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":true}]}}' > "$resp/6.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w3:t1","focused":true}]}}' > "$resp/7.out"
-  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/8.out"
-  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2","focused":true}}}' > "$resp/9.out"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/10.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":false},{"tab_id":"w2:t2","focused":true}]}}' > "$resp/11.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/6.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":true}]}}' > "$resp/7.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w3:t1","focused":true}]}}' > "$resp/8.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/9.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2","focused":true}}}' > "$resp/10.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/11.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":false},{"tab_id":"w2:t2","focused":true}]}}' > "$resp/12.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
@@ -827,12 +830,13 @@ test_projection_close_reports_focus_restore_failure() {
   printf '%s\n' '{"result":{"pane":{"pane_id":"w9:p2","tab_id":"w9:t2","workspace_id":"w9"}}}' > "$resp/3.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","workspace_id":"w9"},{"tab_id":"w9:t2","workspace_id":"w9"}]}}' > "$resp/4.out"
   : > "$resp/5.out"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true}]}}' > "$resp/6.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/7.out"
-  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t1","workspace_id":"w1"}}}' > "$resp/8.out"
-  : > "$resp/9.out"
-  cp "$resp/6.out" "$resp/10.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/6.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true}]}}' > "$resp/7.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/8.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t1","workspace_id":"w1"}}}' > "$resp/9.out"
+  : > "$resp/10.out"
   cp "$resp/7.out" "$resp/11.out"
+  cp "$resp/8.out" "$resp/12.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
@@ -1061,8 +1065,9 @@ test_projection_close_non_emptying_stays_plain_without_proof_or_move() {
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2","tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/3.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","workspace_id":"w2"},{"tab_id":"w2:t2","workspace_id":"w2"}]}}' > "$resp/4.out"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":false}]}}' > "$resp/6.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/7.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/6.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":false}]}}' > "$resp/7.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/8.out"
   sleep 300 & bgpid=$!
   make_death_lab "$dir" "$bgpid"
   fb=$(make_herdr_fakebin "$dir")
@@ -1081,6 +1086,30 @@ test_projection_close_non_emptying_stays_plain_without_proof_or_move() {
   pass "herdr presentation cleanup: a non-emptying close stays plain with no proof, move, or signal"
 }
 
+test_projection_close_plain_without_move_requires_structured_removal() {
+  local dir log out status
+  dir="$TMP_ROOT/close-plain-unconfirmed"; mkdir -p "$dir"
+  log="$dir/log"; : > "$log"
+  out=$(ROOT="$ROOT" LOG="$log" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
+    fm_backend_herdr_emptying_close_plan() { printf "plain\n"; }
+    fm_backend_herdr_projection_focus_restore() { return 0; }
+    fm_backend_herdr_cli() {
+      printf "%s\n" "$*" >> "$LOG"
+      case "$2 $3" in
+        "pane get") printf "{\"result\":{\"pane\":{\"pane_id\":\"w2:p2\",\"tab_id\":\"w2:t2\",\"workspace_id\":\"w2\"}}}\n" ;;
+      esac
+    }
+    fm_backend_herdr_projection_close_pane_focus_preserving fmtest w2:p2
+  ' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a no-move plain close must fail while structured presence remains present: $out"
+  assert_contains "$(cat "$log")" "pane close w2:p2" \
+    "the no-move unconfirmed regression did not reach the explicit close"
+  pass "herdr presentation cleanup: no-move plain close requires structured pane removal"
+}
+
 test_projection_close_ambiguous_positions_fall_back_to_plain_close() {
   local dir log resp fb out status bgpid
   dir="$TMP_ROOT/close-ambiguous-positions"; mkdir -p "$dir/responses"
@@ -1092,8 +1121,9 @@ test_projection_close_ambiguous_positions_fall_back_to_plain_close() {
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}' > "$resp/5.out"
   # The position snapshot is ambiguous: the target workspace is absent.
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true}]}}' > "$resp/6.out"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true}]}}' > "$resp/8.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/9.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/8.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true}]}}' > "$resp/9.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/10.out"
   sleep 300 & bgpid=$!
   make_death_lab "$dir" "$bgpid"
   fb=$(make_herdr_fakebin "$dir")
@@ -1161,8 +1191,9 @@ test_projection_close_busy_pane_falls_back_to_plain_close() {
   sleep 300 & bgpid=$!
   # The pane still has a foreground agent, so the idle-shell proof refuses.
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w2:p2","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh"},{"pid":99999,"name":"pi","argv0":"pi"}]}}}\n' "$bgpid" "$bgpid" "$bgpid" > "$resp/7.out"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true}]}}' > "$resp/9.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/10.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/9.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true}]}}' > "$resp/10.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/11.out"
   make_death_lab "$dir" "$bgpid"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -1478,9 +1509,7 @@ test_kill_focused_workspace_stays_plain_close() {
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","focused":true}]}}' > "$resp/1.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","focused":true}]}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2","tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/3.out"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true}]}}' > "$resp/5.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/6.out"
-  printf '1\n' > "$resp/7.exit"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/5.out"
   sleep 300 & bgpid=$!
   make_death_lab "$dir" "$bgpid"
   fb=$(make_herdr_fakebin "$dir")
@@ -2193,12 +2222,13 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   # tab, so the husk close stays plain.
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","label":"fm-fm-hibit-r1"},{"tab_id":"w2:t3","label":"fm-fm-hibit-r1"}]}}' > "$resp/20.out"
   : > "$resp/21.out"
-  cp "$resp/6.out" "$resp/22.out"
-  cp "$resp/7.out" "$resp/23.out"
-  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/24.out"
-  cp "$resp/1.out" "$resp/25.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t3","label":"fm-fm-hibit-r1"}]}}' > "$resp/26.out"
-  printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p3","tab_id":"w2:t3"}]}}' > "$resp/27.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/22.out"
+  cp "$resp/6.out" "$resp/23.out"
+  cp "$resp/7.out" "$resp/24.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/25.out"
+  cp "$resp/1.out" "$resp/26.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t3","label":"fm-fm-hibit-r1"}]}}' > "$resp/27.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p3","tab_id":"w2:t3"}]}}' > "$resp/28.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '
@@ -3748,6 +3778,7 @@ test_projection_close_emptying_before_focus_repositions_then_uses_pane_death
 test_projection_close_emptying_before_last_focus_needs_no_move
 test_projection_close_emptying_last_workspace_needs_no_move
 test_projection_close_non_emptying_stays_plain_without_proof_or_move
+test_projection_close_plain_without_move_requires_structured_removal
 test_projection_close_ambiguous_positions_fall_back_to_plain_close
 test_projection_close_move_failure_falls_back_to_plain_close
 test_projection_close_busy_pane_falls_back_to_plain_close

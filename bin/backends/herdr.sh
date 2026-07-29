@@ -665,11 +665,7 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     else
       close_status=1
     fi
-  elif [ -n "$plan_move_record" ] \
-    && fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
-    close_status=0
-  elif [ -z "$plan_move_record" ] \
-    && fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1; then
+  elif fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
     close_status=0
   else
     close_status=1
@@ -2520,11 +2516,7 @@ fm_backend_herdr_kill_serialized() {  # <session> <pane>
           fi
           ;;
         *)
-          if [ -n "$plan_move_record" ]; then
-            fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane" || close_failed=1
-          else
-            fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1 || close_failed=1
-          fi
+          fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane" || close_failed=1
           ;;
       esac
       if [ "$close_failed" = 1 ]; then
@@ -2534,7 +2526,7 @@ fm_backend_herdr_kill_serialized() {  # <session> <pane>
       return 0
     fi
   fi
-  fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1 || true
+  fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane" || true
 }
 
 fm_backend_herdr_kill() {  # <target>
