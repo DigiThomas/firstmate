@@ -260,7 +260,7 @@ The rules match the v0.7.5 tag source (`close_selected_workspace` reassigns focu
 
 The full projection and restored-shell suites were re-run the same day on the same version with the updated close path; the presentation suite completed with `real Herdr lab validation completed on Herdr 0.7.5 with the default-session tripwire intact`, and the restored-shell cleanup guarantee above was unchanged.
 
-The teardown-level record-retention gate was verified on 2026-07-29 with metadata fixtures and a live contending lock holder:
+The teardown-level record-retention gate was verified on 2026-07-28 with metadata fixtures and a live contending lock holder:
 
 ```sh
 tests/fm-teardown.test.sh
