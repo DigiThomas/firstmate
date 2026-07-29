@@ -88,6 +88,8 @@ Projected cleanup therefore runs under the same session lock, captures the exact
 The repositioning move-to-last preserves every surviving workspace's relative order, so no presentation ordering change outlives the removal.
 Any ambiguity, unsupported or failed move, or unproved shell falls back to the plain explicit close, and the exact prior-tab restore remains the backstop behind every close, so degraded behavior is never worse than the pre-mitigation sub-second restore.
 Ordinary non-projected task removal serializes through the same session lock, applies the same focus-safe plan when its close would empty a non-focused workspace, keeps the legitimate plain close when the target is the active tab, and refuses an unlocked close if the lock cannot be acquired.
+Task cleanup acquires that session lock before the task's isolated copy is returned, so a contended lock refuses up front while the copy, every durable record, and the endpoint are all intact for a plain rerun.
+Durable task records are erased only once the exact pane is confirmed gone through its structured presence: a refused, skipped, or failed close retains every record with a visible, retryable error, and after a skipped close only a structured not-found response counts as gone.
 If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and preserves the journal for manual inspection.
 
 Recovery is deliberately conservative and presentation-only.

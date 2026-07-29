@@ -1255,9 +1255,16 @@ test_herdr_teardown_clears_escalation_marker() {
     'herdr_workspace_id=wG' \
     'herdr_tab_id=wG:tQ' \
     'herdr_pane_id=wG:pQ' >> "$case_dir/state/task-x1.meta"
-  cat > "$case_dir/fakebin/herdr" <<'SH'
+  # A reachable session whose exact pane is already structurally gone: the
+  # locked close is a no-op and the record gate sees a confirmed-gone pane.
+  cat > "$case_dir/fakebin/herdr" <<SH
 #!/usr/bin/env bash
-exit 0
+case "\${1:-} \${2:-}" in
+  "session list") printf '%s\n' '{"sessions":[{"name":"default","running":true,"socket_path":"$case_dir/herdr.sock"}]}' ;;
+  "status --json") printf '%s\n' '{"server":{"running":true}}' ;;
+  "pane get") printf '%s\n' '{"error":{"code":"pane_not_found"}}'; exit 1 ;;
+  *) exit 0 ;;
+esac
 SH
   chmod +x "$case_dir/fakebin/herdr"
   marker="$case_dir/state/.herdr-escalated-default_wG_pQ"
@@ -1267,6 +1274,137 @@ SH
     || fail "herdr-marker-cleanup: forced teardown failed"
   [ ! -e "$marker" ] || fail "herdr-marker-cleanup: teardown left the pane's escalation marker behind"
   pass "herdr teardown removes pane-owned escalation dedupe state"
+}
+
+# Flat (non-projected) Herdr endpoint whose fake pane exists until a locked
+# close removes it. The socket path is case-local so the derived presentation
+# lock never collides with another test or a real fleet session.
+configure_flat_herdr_teardown_case() {  # <case-dir>
+  local case_dir=$1
+  sed -i.bak 's/^window=.*/window=default:wG:pQ/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' \
+    'backend=herdr' \
+    'herdr_session=default' \
+    'herdr_workspace_id=wG' \
+    'herdr_tab_id=wG:tQ' \
+    'herdr_pane_id=wG:pQ' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/herdr" <<SH
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "\$*" >> "\${FM_FAKE_HERDR_LOG:?}"
+case "\${1:-} \${2:-}" in
+  "workspace list")
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"wH","active_tab_id":"wH:t1","focused":true},{"workspace_id":"wG","active_tab_id":"wG:tQ","focused":false}]}}'
+    ;;
+  "tab list")
+    case "\$*" in
+      *"--workspace wH"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"wH:t1","focused":true}]}}' ;;
+      *"--workspace wG"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"wG:tQ","workspace_id":"wG"}]}}' ;;
+      *) printf '%s\n' '{"result":{"tabs":[]}}' ;;
+    esac
+    ;;
+  "pane list")
+    printf '%s\n' '{"result":{"panes":[{"pane_id":"wG:pQ","tab_id":"wG:tQ"}]}}'
+    ;;
+  "status --json")
+    printf '%s\n' '{"server":{"running":true}}'
+    ;;
+  "session list")
+    printf '%s\n' '{"sessions":[{"name":"default","running":true,"socket_path":"$case_dir/herdr.sock"}]}'
+    ;;
+  "pane close")
+    : > "\${FM_FAKE_HERDR_CLOSED:?}"
+    ;;
+  "pane get")
+    if [ -e "\${FM_FAKE_HERDR_CLOSED:?}" ]; then
+      printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+      exit 1
+    fi
+    printf '%s\n' '{"result":{"pane":{"pane_id":"wG:pQ","tab_id":"wG:tQ","workspace_id":"wG"}}}'
+    ;;
+  "agent get")
+    printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+}
+
+test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes() {
+  local case_dir log closed lock ready release holder_pid rc thlog
+  case_dir=$(make_case herdr-orphan-refusal)
+  write_meta "$case_dir" local-only ship
+  configure_flat_herdr_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; : > "$log"
+  closed="$case_dir/closed"
+  : > "$case_dir/state/task-x1.status"
+  : > "$case_dir/state/task-x1.turn-ended"
+  # Record every treehouse invocation: the contended-lock refusal must fire
+  # BEFORE the isolated copy is returned, so phase 1 may not invoke it at all.
+  thlog="$case_dir/treehouse.log"; : > "$thlog"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$thlog"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  lock=$(FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" PATH="$case_dir/fakebin:$PATH" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path default' "$ROOT") \
+    || fail "herdr-orphan-refusal: could not resolve the fixture presentation lock path"
+  ready="$case_dir/lock-ready"; release="$case_dir/lock-release"
+  ROOT="$ROOT" LOCK="$lock" READY="$ready" RELEASE="$release" bash -c '
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$LOCK" || exit 1
+    : > "$READY"
+    while [ ! -e "$RELEASE" ]; do sleep 0.1; done
+    fm_lock_release "$LOCK"
+  ' &
+  holder_pid=$!
+  local waited=0
+  while [ ! -e "$ready" ] && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited + 1)); done
+  [ -e "$ready" ] || fail "herdr-orphan-refusal: the contending lock holder never started"
+
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    : > "$release"; wait "$holder_pid" 2>/dev/null || true
+    fail "herdr-orphan-refusal: teardown reported success while the exact pane still existed under lock contention"
+  fi
+  [ -e "$case_dir/state/task-x1.meta" ] || { : > "$release"; fail "herdr-orphan-refusal: refusal erased the durable endpoint metadata"; }
+  [ -e "$case_dir/state/task-x1.status" ] || { : > "$release"; fail "herdr-orphan-refusal: refusal erased the task status record"; }
+  [ -e "$case_dir/state/task-x1.turn-ended" ] || { : > "$release"; fail "herdr-orphan-refusal: refusal erased the turn-end record"; }
+  assert_grep "presentation lock is contended" "$case_dir/stderr" \
+    "herdr-orphan-refusal: the pre-return refusal was not explained visibly"
+  if [ -s "$thlog" ]; then
+    : > "$release"; fail "herdr-orphan-refusal: the contended refusal still returned the isolated copy: $(cat "$thlog")"
+  fi
+  [ -d "$case_dir/wt" ] || { : > "$release"; fail "herdr-orphan-refusal: the contended refusal removed the isolated copy"; }
+  if [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" != "fm/task-x1" ]; then
+    : > "$release"; fail "herdr-orphan-refusal: the contended refusal dropped the task branch before refusing"
+  fi
+  if grep -q "teardown task-x1 complete" "$case_dir/stdout"; then
+    : > "$release"; fail "herdr-orphan-refusal: refusal still reported cleanup complete"
+  fi
+  if grep -q "^pane close" "$log"; then
+    : > "$release"; fail "herdr-orphan-refusal: an unlocked pane close was attempted under contention"
+  fi
+
+  : > "$release"
+  wait "$holder_pid" 2>/dev/null || true
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "herdr-orphan-refusal: the retry after lock release failed: $(cat "$case_dir/stderr2")"
+  [ -e "$closed" ] || fail "herdr-orphan-refusal: the retry never closed the pane under the lock"
+  [ -s "$thlog" ] || fail "herdr-orphan-refusal: the successful retry never returned the isolated copy"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "herdr-orphan-refusal: the successful retry left the metadata behind"
+  [ ! -e "$case_dir/state/task-x1.status" ] || fail "herdr-orphan-refusal: the successful retry left the status record behind"
+  grep -q "teardown task-x1 complete" "$case_dir/stdout2" \
+    || fail "herdr-orphan-refusal: the successful retry did not report completion"
+  pass "herdr flat teardown refuses before returning the isolated copy under lock contention and the retry completes cleanly"
 }
 
 configure_herdr_projection_teardown_case() {  # <case-dir>
@@ -1365,16 +1503,22 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   configure_herdr_projection_teardown_case "$case_dir"
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
 
+  local rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_CLOSE_FAIL=1 \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
-    || fail "herdr-projection-unconfirmed-close: teardown should preserve best-effort endpoint semantics"
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "herdr-projection-unconfirmed-close: teardown reported success while the exact pane still existed"
   [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
     || fail "unconfirmed task-pane close incorrectly retired the presentation journal"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "unconfirmed task-pane close erased the durable endpoint metadata"
   assert_grep "close could not be confirmed" "$case_dir/stderr" \
     "unconfirmed projected close did not explain why the journal was retained"
+  assert_grep "not confirmed gone" "$case_dir/stderr" \
+    "unconfirmed projected close did not explain why the records were retained"
   assert_not_contains "$(cat "$log")" "workspace close" \
     "unconfirmed projected close must not escalate to workspace cleanup"
-  pass "herdr projection teardown retains the stale journal and attempts no workspace cleanup when exact-pane close is unconfirmed"
+  pass "herdr projection teardown retains the journal and every durable record when exact-pane close is unconfirmed"
 }
 
 test_local_only_fork_remote_allows
@@ -1386,6 +1530,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
+test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_squash_merged_branch_deleted_allows
