@@ -1457,11 +1457,15 @@ SH
 
   teardown_bin=$TEARDOWN
   case "$mode" in
-    missing-adapter|missing-parser)
+    missing-adapter|missing-parser|missing-explicit-close-helper)
       mkdir -p "$case_dir/test-root"
       cp -R "$ROOT/bin" "$case_dir/test-root/bin"
       if [ "$mode" = missing-adapter ]; then
         rm -f "$case_dir/test-root/bin/backends/herdr.sh"
+      elif [ "$mode" = missing-explicit-close-helper ]; then
+        sed -i.bak 's/^fm_backend_herdr_explicit_close_pane_confirmed()/fm_backend_herdr_explicit_close_pane_confirmed_unavailable()/' \
+          "$case_dir/test-root/bin/backends/herdr.sh"
+        rm -f "$case_dir/test-root/bin/backends/herdr.sh.bak"
       else
         sed -i.bak 's/^fm_backend_herdr_parse_target()/fm_backend_herdr_parse_target_unavailable()/' \
           "$case_dir/test-root/bin/backends/herdr.sh"
@@ -1496,6 +1500,7 @@ test_herdr_flat_teardown_preflight_refuses_before_changes() {
   assert_herdr_teardown_preflight_refuses_before_changes unresolvable-lock
   assert_herdr_teardown_preflight_refuses_before_changes missing-adapter
   assert_herdr_teardown_preflight_refuses_before_changes missing-parser
+  assert_herdr_teardown_preflight_refuses_before_changes missing-explicit-close-helper
   pass "herdr flat teardown preflight refuses before every destructive change"
 }
 

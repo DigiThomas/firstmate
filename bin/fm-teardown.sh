@@ -1143,6 +1143,7 @@ if [ "$BACKEND" = herdr ]; then
     fm_backend_herdr_parse_target \
     fm_backend_herdr_pane_presence_state \
     fm_backend_herdr_endpoint_confirmed_gone \
+    fm_backend_herdr_explicit_close_pane_confirmed \
     fm_backend_herdr_presentation_session_lock_path; do
     if ! declare -F "$TEARDOWN_HERDR_PREREQUISITE" >/dev/null 2>&1; then
       echo "error: herdr teardown prerequisites are unavailable for $ID; nothing was changed - restore the adapter and rerun teardown" >&2
