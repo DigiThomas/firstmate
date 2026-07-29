@@ -1317,6 +1317,10 @@ case "\${1:-} \${2:-}" in
     : > "\${FM_FAKE_HERDR_CLOSED:?}"
     ;;
   "pane get")
+    if [ "\${FM_FAKE_HERDR_PANE_GET_GARBAGE:-0}" = 1 ]; then
+      printf '%s\n' 'not-json'
+      exit 0
+    fi
     if [ -e "\${FM_FAKE_HERDR_CLOSED:?}" ]; then
       printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
       exit 1
@@ -1405,6 +1409,29 @@ SH
   grep -q "teardown task-x1 complete" "$case_dir/stdout2" \
     || fail "herdr-orphan-refusal: the successful retry did not report completion"
   pass "herdr flat teardown refuses before returning the isolated copy under lock contention and the retry completes cleanly"
+}
+
+test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
+  local case_dir log closed rc
+  case_dir=$(make_case herdr-garbage-presence)
+  write_meta "$case_dir" local-only ship
+  configure_flat_herdr_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; : > "$log"
+  closed="$case_dir/closed"
+  : > "$case_dir/state/task-x1.status"
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_PANE_GET_GARBAGE=1 \
+    FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "herdr-garbage-presence: teardown erased records on an unparseable pane presence"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-garbage-presence: ambiguous presence erased the durable endpoint metadata"
+  [ -e "$case_dir/state/task-x1.status" ] \
+    || fail "herdr-garbage-presence: ambiguous presence erased the task status record"
+  assert_grep "not confirmed gone" "$case_dir/stderr" \
+    "herdr-garbage-presence: the ambiguity refusal was not explained visibly"
+  pass "herdr flat teardown never erases records when pane presence is unparseable"
 }
 
 configure_herdr_projection_teardown_case() {  # <case-dir>
@@ -1537,6 +1564,7 @@ test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
+test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_squash_merged_branch_deleted_allows
