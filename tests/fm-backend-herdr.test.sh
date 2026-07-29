@@ -1447,15 +1447,16 @@ test_endpoint_confirmed_gone_gates_on_structured_presence() {
     check present-strict "{\"result\":{\"pane\":{\"pane_id\":\"w2:p2\"}}}" 0 strict 1
     check notfound-default "{\"error\":{\"code\":\"pane_not_found\"}}" 1 "" 0
     check notfound-strict "{\"error\":{\"code\":\"pane_not_found\"}}" 1 strict 0
-    check unknown-default "" 1 "" 0
+    check unknown-default "" 1 "" 1
     check unknown-strict "" 1 strict 1
+    check othererror-default "{\"error\":{\"code\":\"internal\"}}" 1 "" 1
     check othererror-strict "{\"error\":{\"code\":\"internal\"}}" 1 strict 1
     rc=0
     fm_backend_herdr_endpoint_confirmed_gone malformed-target strict || rc=$?
     [ "$rc" = 0 ] || printf "MISMATCH malformed-target: rc=%s expected=0\n" "$rc"
   ' "$ROOT" 2>&1)
   [ -z "$out" ] || fail "endpoint confirmed-gone gate matrix mismatch: $out"
-  pass "endpoint confirmed-gone: structured presence gates records with strict refusing unknown after a known refusal"
+  pass "endpoint confirmed-gone: only structured not-found permits record removal in every mode"
 }
 
 test_projection_seeded_prune_refuses_active_tab() {

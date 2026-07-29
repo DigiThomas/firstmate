@@ -2474,23 +2474,13 @@ fm_backend_herdr_kill() {  # <target>
 # the exact recorded pane's structured presence
 # (fm_backend_herdr_pane_presence_state), read-only, so a refused, skipped,
 # or failed close never erases a live task's endpoint identity.
-# The default mode succeeds unless the pane is provably present, preserving
-# the pre-existing best-effort semantics after a close genuinely ran under
-# the session lock.
-# Mode "strict" is for callers that know the close was refused or skipped:
-# only a structured pane_not_found proves the endpoint gone, and both present
-# and unknown refuse, because an unknown state must never be treated as
-# confirmed gone after a known refusal.
+# Only a structured pane_not_found proves the endpoint gone; both present and
+# unknown refuse after every close path.
 fm_backend_herdr_endpoint_confirmed_gone() {  # <target> [strict]
-  local mode=${2:-} presence
+  local presence
   fm_backend_herdr_parse_target "$1" || return 0
   presence=$(fm_backend_herdr_pane_presence_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
-  case "$presence" in
-    dead) return 0 ;;
-    present) return 1 ;;
-  esac
-  [ "$mode" = strict ] && return 1
-  return 0
+  [ "$presence" = dead ]
 }
 
 # fm_backend_herdr_classify_agent_status: map a raw `agent get` agent_status

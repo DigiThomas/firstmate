@@ -1257,14 +1257,12 @@ fi
 # A refused, skipped, or failed Herdr close must never erase a live task's
 # durable endpoint identity: unless the exact pane is confirmed gone, retain
 # every record and stop before any removal below so a later rerun can retry
-# the locked close. When the close was skipped because no lock was held, an
-# unknown pane state also refuses; only a structured not-found proves gone.
+# the locked close. After every close path, only a structured not-found proves
+# the pane gone; an unknown state always refuses.
 if [ "$BACKEND" = herdr ] && [ -n "$T" ]; then
   fm_backend_source herdr || true
-  TEARDOWN_HERDR_GONE_MODE=
-  [ "$TEARDOWN_HERDR_LOCK_HELD" = 1 ] || TEARDOWN_HERDR_GONE_MODE=strict
   if declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1 \
-    && ! fm_backend_herdr_endpoint_confirmed_gone "$T" "$TEARDOWN_HERDR_GONE_MODE"; then
+    && ! fm_backend_herdr_endpoint_confirmed_gone "$T" strict; then
     echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
     exit 1
   fi

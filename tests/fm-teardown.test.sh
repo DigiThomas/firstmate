@@ -1456,6 +1456,10 @@ case "${1:-} ${2:-}" in
     ;;
   "pane get")
     if [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
+      if [ "${FM_FAKE_HERDR_PRESENCE_UNKNOWN:-0}" = 1 ]; then
+        printf '%s\n' '{"error":{"code":"internal"}}' >&2
+        exit 1
+      fi
       printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
       exit 1
     fi
@@ -1504,10 +1508,12 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
 
   local rc=0
-  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_CLOSE_FAIL=1 \
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_PRESENCE_UNKNOWN=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] \
-    || fail "herdr-projection-unconfirmed-close: teardown reported success while the exact pane still existed"
+    || fail "herdr-projection-unconfirmed-close: teardown reported success after an unknown post-close presence read"
+  [ -e "$closed" ] \
+    || fail "herdr-projection-unconfirmed-close: regression did not exercise an attempted close"
   [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
     || fail "unconfirmed task-pane close incorrectly retired the presentation journal"
   [ -e "$case_dir/state/task-x1.meta" ] \
@@ -1518,7 +1524,7 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
     "unconfirmed projected close did not explain why the records were retained"
   assert_not_contains "$(cat "$log")" "workspace close" \
     "unconfirmed projected close must not escalate to workspace cleanup"
-  pass "herdr projection teardown retains the journal and every durable record when exact-pane close is unconfirmed"
+  pass "herdr projection teardown retains every record when post-close presence is unknown"
 }
 
 test_local_only_fork_remote_allows
