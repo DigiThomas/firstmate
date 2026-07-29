@@ -1126,8 +1126,9 @@ test_projection_close_move_failure_falls_back_to_plain_close() {
   # shellcheck disable=SC2016 # $defs is a literal JSON Schema key.
   printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/8.out"
   printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/9.out"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/11.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/12.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/11.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/12.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/13.out"
   sleep 300 & bgpid=$!
   make_death_lab "$dir" "$bgpid"
   fb=$(make_herdr_fakebin "$dir")
@@ -1266,8 +1267,9 @@ test_projection_close_death_failure_falls_back_to_plain_close() {
   death_process_info_fixture w2:p2 "$bgpid" > "$resp/10.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/11.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/12.out"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true}]}}' > "$resp/14.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/15.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/14.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true}]}}' > "$resp/15.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/16.out"
   make_death_lab "$dir" "$bgpid"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -1333,8 +1335,9 @@ test_projection_close_death_never_sigkills_a_reused_pid() {
   cp "$resp/3.out" "$resp/9.out"   # SIGHUP poll 2: pane still present
   death_process_info_fixture w2:p2 99997 > "$resp/10.out"
   : > "$resp/11.out"               # fallback explicit close: pane close ok
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true}]}}' > "$resp/12.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/13.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/12.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true}]}}' > "$resp/13.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/14.out"
   make_death_lab "$dir" "$bgpid"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -1353,9 +1356,9 @@ test_projection_close_death_never_sigkills_a_reused_pid() {
   pass "herdr presentation cleanup: SIGKILL never reaches a pid the exact pane no longer owns"
 }
 
-test_projection_close_failed_removal_rolls_back_the_reposition() {
-  local dir log resp fb out status bgpid
-  dir="$TMP_ROOT/close-move-rollback"; mkdir -p "$dir/responses"
+assert_projection_close_failed_removal_rolls_back_the_reposition() {
+  local mode=$1 dir log resp fb out status bgpid
+  dir="$TMP_ROOT/close-move-rollback-$mode"; mkdir -p "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
   # Doomed w1 sits BEFORE the focused w2 (not last): the plan repositions it
   # to the end; then every removal path fails, so the exact original order
@@ -1377,9 +1380,16 @@ test_projection_close_failed_removal_rolls_back_the_reposition() {
   death_process_info_fixture w1:p1 "$bgpid" > "$resp/13.out"  # escalation resample: same owner
   cp "$resp/3.out" "$resp/14.out"  # SIGKILL poll 1: pane still present
   cp "$resp/3.out" "$resp/15.out"  # SIGKILL poll 2: pane still present
-  printf '9\n' > "$resp/16.exit"   # fallback explicit close fails too
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/17.out"
-  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/18.out"
+  if [ "$mode" = command-fails ]; then
+    printf '9\n' > "$resp/16.exit"
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/17.out"
+    printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/18.out"
+  else
+    : > "$resp/16.out"
+    cp "$resp/3.out" "$resp/17.out"
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","focused":false}]}}' > "$resp/18.out"
+    printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t1","focused":true}]}}' > "$resp/19.out"
+  fi
   make_death_lab "$dir" "$bgpid"
   printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w2","focused":true},{"workspace_id":"w3","focused":false},{"workspace_id":"w1","focused":false}]}}' > "$dir/mover-response"
   printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1","focused":false},{"workspace_id":"w2","focused":true},{"workspace_id":"w3","focused":false}]}}' > "$dir/mover-response-2"
@@ -1392,7 +1402,7 @@ test_projection_close_failed_removal_rolls_back_the_reposition() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w1:p1' "$ROOT" 2>&1)
   status=$?
   kill -KILL "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
-  [ "$status" -ne 0 ] || fail "a fully failed removal must report failure: $out"
+  [ "$status" -ne 0 ] || fail "an unconfirmed removal must report failure: $out"
   [ "$(wc -l < "$dir/mover.log" | tr -d ' ')" = 2 ] \
     || fail "a failed removal did not roll the reposition back exactly once: $(cat "$dir/mover.log")"
   [ "$(sed -n '1p' "$dir/mover.log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w1"$'\t'"3" ] \
@@ -1400,7 +1410,12 @@ test_projection_close_failed_removal_rolls_back_the_reposition() {
   [ "$(sed -n '2p' "$dir/mover.log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w1"$'\t'"0" ] \
     || fail "the rollback did not restore the doomed workspace to its exact original position: $(sed -n '2p' "$dir/mover.log")"
   assert_not_contains "$(cat "$log")" $'tab\x1ffocus' "a failed rolled-back removal moved focus"
-  pass "herdr presentation cleanup: a failed removal restores the exact original workspace order and reports failure"
+}
+
+test_projection_close_failed_removal_rolls_back_the_reposition() {
+  assert_projection_close_failed_removal_rolls_back_the_reposition command-fails
+  assert_projection_close_failed_removal_rolls_back_the_reposition command-succeeds-pane-present
+  pass "herdr presentation cleanup: every unconfirmed removal restores the exact original workspace order and reports failure"
 }
 
 test_kill_emptying_non_focused_uses_pane_death() {

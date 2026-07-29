@@ -660,15 +660,19 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
   if [ "$plan" = death ]; then
     if fm_backend_herdr_death_close_pane "$session" "$pane_id" "$plan_shell_pid"; then
       close_status=0
-    elif fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1; then
+    elif fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
       close_status=0
     else
-      close_status=$?
+      close_status=1
     fi
-  elif fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1; then
+  elif [ -n "$plan_move_record" ] \
+    && fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
+    close_status=0
+  elif [ -z "$plan_move_record" ] \
+    && fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1; then
     close_status=0
   else
-    close_status=$?
+    close_status=1
   fi
   if [ "$close_status" -ne 0 ]; then
     fm_backend_herdr_emptying_move_rollback "$plan_move_record" || true
@@ -1368,6 +1372,15 @@ fm_backend_herdr_pane_presence_state() {  # <session> <pane_id>
   fi
   pid=$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
   [ "$pid" = "$pane_id" ] && printf 'present' || printf 'unknown'
+}
+
+# fm_backend_herdr_explicit_close_pane_confirmed: issue one explicit close and
+# succeed only when a structured follow-up proves the exact pane is gone.
+fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 presence
+  fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || return 1
+  presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
+  [ "$presence" = dead ]
 }
 
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
@@ -2502,12 +2515,16 @@ fm_backend_herdr_kill_serialized() {  # <session> <pane>
         death\ *)
           shell_pid=${plan#death }
           if ! fm_backend_herdr_death_close_pane "$session" "$pane" "$shell_pid" \
-            && ! fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1; then
+            && ! fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane"; then
             close_failed=1
           fi
           ;;
         *)
-          fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1 || close_failed=1
+          if [ -n "$plan_move_record" ]; then
+            fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane" || close_failed=1
+          else
+            fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1 || close_failed=1
+          fi
           ;;
       esac
       if [ "$close_failed" = 1 ]; then

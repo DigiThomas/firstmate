@@ -1122,8 +1122,8 @@ fi
 # runs under the named-session presentation lock, acquired BEFORE anything is
 # returned or erased: a contended lock refuses here while the isolated copy,
 # every durable record, and the endpoint are all still intact for a plain
-# rerun. An unresolvable lock path (for example an unreachable server) skips
-# the close instead of ever running one unlocked.
+# rerun. An unresolvable lock path (for example an unreachable server) also
+# refuses before any destructive step.
 TEARDOWN_HERDR_LOCK=
 TEARDOWN_HERDR_LOCK_HELD=0
 TEARDOWN_HERDR_SESSION=
@@ -1144,22 +1144,24 @@ if [ "$BACKEND" = herdr ]; then
     && fm_backend_herdr_parse_target "$T"; then
     TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
     TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
-    if TEARDOWN_HERDR_LOCK=$(fm_backend_herdr_presentation_session_lock_path "$TEARDOWN_HERDR_SESSION"); then
-      TEARDOWN_HERDR_LOCK_ATTEMPT=0
-      while [ "$TEARDOWN_HERDR_LOCK_ATTEMPT" -lt 50 ]; do
-        if fm_lock_try_acquire "$TEARDOWN_HERDR_LOCK"; then
-          TEARDOWN_HERDR_LOCK_HELD=1
-          break
-        fi
-        sleep 0.1
-        TEARDOWN_HERDR_LOCK_ATTEMPT=$((TEARDOWN_HERDR_LOCK_ATTEMPT + 1))
-      done
-      if [ "$TEARDOWN_HERDR_LOCK_HELD" != 1 ]; then
-        echo "error: herdr session presentation lock is contended for $ID; nothing was changed - rerun teardown once the contention clears" >&2
-        exit 1
-      fi
-      trap teardown_release_herdr_lock EXIT
+    if ! TEARDOWN_HERDR_LOCK=$(fm_backend_herdr_presentation_session_lock_path "$TEARDOWN_HERDR_SESSION"); then
+      echo "error: herdr session presentation lock could not be resolved for $ID; nothing was changed - rerun teardown once the session is reachable and unambiguous" >&2
+      exit 1
     fi
+    TEARDOWN_HERDR_LOCK_ATTEMPT=0
+    while [ "$TEARDOWN_HERDR_LOCK_ATTEMPT" -lt 50 ]; do
+      if fm_lock_try_acquire "$TEARDOWN_HERDR_LOCK"; then
+        TEARDOWN_HERDR_LOCK_HELD=1
+        break
+      fi
+      sleep 0.1
+      TEARDOWN_HERDR_LOCK_ATTEMPT=$((TEARDOWN_HERDR_LOCK_ATTEMPT + 1))
+    done
+    if [ "$TEARDOWN_HERDR_LOCK_HELD" != 1 ]; then
+      echo "error: herdr session presentation lock is contended for $ID; nothing was changed - rerun teardown once the contention clears" >&2
+      exit 1
+    fi
+    trap teardown_release_herdr_lock EXIT
   fi
 fi
 

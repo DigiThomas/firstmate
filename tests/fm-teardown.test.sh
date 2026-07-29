@@ -1311,7 +1311,11 @@ case "\${1:-} \${2:-}" in
     printf '%s\n' '{"server":{"running":true}}'
     ;;
   "session list")
-    printf '%s\n' '{"sessions":[{"name":"default","running":true,"socket_path":"$case_dir/herdr.sock"}]}'
+    if [ "\${FM_FAKE_HERDR_SESSION_LIST_GARBAGE:-0}" = 1 ]; then
+      printf '%s\n' 'not-json'
+    else
+      printf '%s\n' '{"sessions":[{"name":"default","running":true,"socket_path":"$case_dir/herdr.sock"}]}'
+    fi
     ;;
   "pane close")
     : > "\${FM_FAKE_HERDR_CLOSED:?}"
@@ -1432,6 +1436,43 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
   assert_grep "not confirmed gone" "$case_dir/stderr" \
     "herdr-garbage-presence: the ambiguity refusal was not explained visibly"
   pass "herdr flat teardown never erases records when pane presence is unparseable"
+}
+
+test_herdr_flat_teardown_refuses_before_changes_on_unresolvable_lock() {
+  local case_dir log closed rc thlog
+  case_dir=$(make_case herdr-unresolvable-lock)
+  write_meta "$case_dir" local-only ship
+  configure_flat_herdr_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; : > "$log"
+  closed="$case_dir/closed"
+  : > "$case_dir/state/task-x1.status"
+  : > "$case_dir/state/task-x1.turn-ended"
+  thlog="$case_dir/treehouse.log"; : > "$thlog"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$thlog"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_SESSION_LIST_GARBAGE=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "herdr-unresolvable-lock: teardown continued without the required presentation lock"
+  assert_grep "presentation lock could not be resolved" "$case_dir/stderr" \
+    "herdr-unresolvable-lock: the retryable pre-return refusal was not explained visibly"
+  [ -d "$case_dir/wt" ] || fail "herdr-unresolvable-lock: refusal removed the isolated copy"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "fm/task-x1" ] \
+    || fail "herdr-unresolvable-lock: refusal dropped the task branch"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-unresolvable-lock: refusal erased the durable endpoint metadata"
+  [ -e "$case_dir/state/task-x1.status" ] \
+    || fail "herdr-unresolvable-lock: refusal erased the task status record"
+  [ -e "$case_dir/state/task-x1.turn-ended" ] \
+    || fail "herdr-unresolvable-lock: refusal erased the turn-end record"
+  [ ! -s "$thlog" ] || fail "herdr-unresolvable-lock: refusal returned the isolated copy"
+  [ ! -e "$closed" ] || fail "herdr-unresolvable-lock: refusal attempted an unlocked pane close"
+  pass "herdr flat teardown refuses before every destructive change when its presentation lock is unresolvable"
 }
 
 configure_herdr_projection_teardown_case() {  # <case-dir>
@@ -1565,6 +1606,7 @@ test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
+test_herdr_flat_teardown_refuses_before_changes_on_unresolvable_lock
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_squash_merged_branch_deleted_allows
