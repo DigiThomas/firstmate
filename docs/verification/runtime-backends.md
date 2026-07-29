@@ -243,7 +243,7 @@ Observed output:
 
 ```text
 ok - old path: the explicit last-pane close of a non-focused workspace stole focus (w3	w3:t1 -> w2	w2:t1)
-ok - mitigation: the doomed workspace was removed with the exact focus and survivor order preserved
+ok - mitigation: every in-operation sample preserved exact focus while the doomed workspace was removed
 ok - mitigation: no explicit close and no corrective focus were needed on the defective release
 evidence: herdr=0.7.5 protocol=17 steal_live=1 default-session-tripwire=armed
 ```
