@@ -812,7 +812,7 @@ fm_backend_herdr_emptying_close_plan() {  # <session> <pane-id> <workspace-id> <
 # shell, so an exited or reused pid is never signaled.
 # Returns 0 only when the pane is confirmed gone.
 fm_backend_herdr_death_close_pane() {  # <session> <pane-id> <shell-pid>
-  local session=$1 pane_id=$2 shell_pid=$3 ps_bin attempt max_attempts
+  local session=$1 pane_id=$2 shell_pid=$3 ps_bin attempt max_attempts presence
   ps_bin=${FM_HERDR_PS_BIN:-ps}
   case "$shell_pid" in
     ''|*[!0-9]*) return 1 ;;
@@ -823,7 +823,8 @@ fm_backend_herdr_death_close_pane() {  # <session> <pane-id> <shell-pid>
   kill -HUP "$shell_pid" 2>/dev/null || true
   attempt=0
   while [ "$attempt" -lt "$max_attempts" ]; do
-    fm_backend_herdr_cli "$session" pane get "$pane_id" >/dev/null 2>&1 || return 0
+    presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
+    [ "$presence" = dead ] && return 0
     sleep 0.05
     attempt=$((attempt + 1))
   done
@@ -831,7 +832,8 @@ fm_backend_herdr_death_close_pane() {  # <session> <pane-id> <shell-pid>
   kill -KILL "$shell_pid" 2>/dev/null || true
   attempt=0
   while [ "$attempt" -lt "$max_attempts" ]; do
-    fm_backend_herdr_cli "$session" pane get "$pane_id" >/dev/null 2>&1 || return 0
+    presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
+    [ "$presence" = dead ] && return 0
     sleep 0.05
     attempt=$((attempt + 1))
   done
@@ -1291,6 +1293,20 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
   printf '%s:%s\t%s' "$session" "$FM_BACKEND_HERDR_WS_ID" "$FM_BACKEND_HERDR_WS_SEEDED_TAB_ID"
 }
 
+# fm_backend_herdr_pane_presence_state: classify one exact pane get response
+# as dead|present|unknown from its JSON body, never from process exit status.
+fm_backend_herdr_pane_presence_state() {  # <session> <pane_id>
+  local session=$1 pane_id=$2 out code pid
+  out=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1)
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ -n "$code" ]; then
+    [ "$code" = "pane_not_found" ] && printf 'dead' || printf 'unknown'
+    return 0
+  fi
+  pid=$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
+  [ "$pid" = "$pane_id" ] && printf 'present' || printf 'unknown'
+}
+
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
 # dead|no-agent|live|unknown, purely from the JSON body of two read-only
 # calls - never from process exit status, since a business-logic "not found"
@@ -1323,24 +1339,13 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace>
 #              refusal here, never toward closing - this is the conservative
 #              backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out code pid status
-  # 2>&1, not 2>/dev/null: verified empirically that real herdr 0.7.1 writes
-  # an error response's JSON body to STDERR (success bodies go to stdout), so
-  # discarding stderr here would blind this function to exactly the
-  # error.code values (pane_not_found, agent_not_found) it exists to read -
-  # every OTHER call site in this file discards stderr safely only because
-  # its caller collapses both the error and the not-an-error paths to the
-  # same final answer, which this function's dead/no-agent/live/unknown
-  # distinction cannot afford to do.
-  out=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1)
-  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
-  if [ -n "$code" ]; then
-    [ "$code" = "pane_not_found" ] && printf 'dead' || printf 'unknown'
-    return 0
-  fi
-  pid=$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
-  if [ "$pid" != "$pane_id" ]; then
-    printf 'unknown'
+  local session=$1 pane_id=$2 out code presence status
+  presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
+  if [ "$presence" != present ]; then
+    case "$presence" in
+      dead|unknown) printf '%s' "$presence" ;;
+      *) printf 'unknown' ;;
+    esac
     return 0
   fi
   out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
