@@ -2413,8 +2413,8 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
 # projected cleanup (a verified pane-death removal with the doomed workspace
 # repositioned behind the focused one when needed), keeping the exact-tab
 # restore as the backstop. A close that empties the FOCUSED workspace moves
-# focus legitimately, and every ambiguity or failure falls back to the plain
-# close, matching the pre-hardening contract.
+# focus legitimately, and every in-lock planning ambiguity or failure falls
+# back to the plain close, matching the pre-hardening contract.
 fm_backend_herdr_kill_serialized() {  # <session> <pane>
   local session=$1 pane=$2
   local before active_tab info target_pane target_tab target_ws plan shell_pid
@@ -2466,7 +2466,7 @@ fm_backend_herdr_kill() {  # <target>
     fm_backend_herdr_kill_serialized "$session" "$pane"
     fm_lock_release "$lock_path" || true
   else
-    fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1 || true
+    echo "warning: herdr task kill could not acquire its session presentation lock; refusing an unlocked pane close" >&2
   fi
 }
 

@@ -1393,6 +1393,45 @@ test_kill_focused_workspace_stays_plain_close() {
   pass "fm_backend_herdr_kill: killing the focused workspace's tab keeps the legitimate plain close"
 }
 
+test_kill_refuses_when_presentation_lock_is_unavailable() {
+  local dir mode out status attempts
+  dir="$TMP_ROOT/kill-lock-refusal"; mkdir -p "$dir"
+  for mode in unresolved contended; do
+    : > "$dir/cli.log"
+    : > "$dir/attempts"
+    out=$(ROOT="$ROOT" MODE="$mode" CLI_LOG="$dir/cli.log" ATTEMPTS="$dir/attempts" bash -c '
+      . "$ROOT/bin/backends/herdr.sh"
+      fm_backend_herdr_target_ready() { fm_backend_herdr_parse_target "$1"; }
+      fm_backend_herdr_presentation_session_lock_path() {
+        [ "$MODE" = contended ] || return 1
+        printf "/tmp/fm-herdr-contended-test-lock"
+      }
+      fm_lock_try_acquire() {
+        printf "x\n" >> "$ATTEMPTS"
+        return 1
+      }
+      fm_backend_herdr_cli() {
+        printf "%s\n" "$*" >> "$CLI_LOG"
+        return 0
+      }
+      sleep() { :; }
+      fm_backend_herdr_kill fmtest:w2:p2
+    ' 2>&1)
+    status=$?
+    [ "$status" -eq 0 ] || fail "$mode presentation lock refusal changed best-effort kill status: $status"
+    [ ! -s "$dir/cli.log" ] || fail "$mode presentation lock refusal still mutated Herdr: $(cat "$dir/cli.log")"
+    assert_contains "$out" "refusing an unlocked pane close" \
+      "$mode presentation lock refusal did not report the deferred close"
+    attempts=$(wc -l < "$dir/attempts" | tr -d ' ')
+    if [ "$mode" = contended ]; then
+      [ "$attempts" = 50 ] || fail "contended presentation lock did not use the bounded wait: $attempts attempts"
+    else
+      [ "$attempts" = 0 ] || fail "unresolved presentation lock path attempted acquisition: $attempts"
+    fi
+  done
+  pass "fm_backend_herdr_kill: unavailable session locks defer every pane close"
+}
+
 test_projection_seeded_prune_refuses_active_tab() {
   local dir log resp fb out status
   dir="$TMP_ROOT/projection-seeded-focus-active-refusal"; mkdir -p "$dir/responses"
@@ -2215,7 +2254,14 @@ test_kill_is_best_effort() {
   printf '1\n' > "$resp/1.exit"
   fb=$(make_herdr_fakebin "$dir")
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_kill default:w1:p2' "$ROOT"
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_target_ready() { fm_backend_herdr_parse_target "$1"; }
+      fm_backend_herdr_presentation_session_lock_path() { printf "/tmp/fm-herdr-test-lock"; }
+      fm_lock_try_acquire() { return 0; }
+      fm_lock_release() { return 0; }
+      fm_backend_herdr_kill default:w1:p2
+    ' "$ROOT"
   expect_code 0 $? "kill must be best-effort (never fail even when the pane close call itself fails)"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close'$'\x1f''w1:p2' "kill did not call pane close on the right pane"
   pass "fm_backend_herdr_kill: calls pane close and stays best-effort on failure"
@@ -3038,7 +3084,13 @@ $ids
 EOF
     [ -n "$pane" ] || fail "cycle $i: create_task returned no pane id"
     PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
-      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_kill "$1"' "$ROOT" "fmtest:$pane" \
+      bash -c '
+        . "$0/bin/backends/herdr.sh"
+        fm_backend_herdr_presentation_session_lock_path() { printf "/tmp/fm-herdr-cycle-test-lock"; }
+        fm_lock_try_acquire() { return 0; }
+        fm_lock_release() { return 0; }
+        fm_backend_herdr_kill "$1"
+      ' "$ROOT" "fmtest:$pane" \
       || fail "cycle $i: kill failed"
   done
   # exactly one firstmate workspace survives three spawn/teardown cycles
@@ -3562,6 +3614,7 @@ test_projection_close_death_failure_falls_back_to_plain_close
 test_projection_close_death_still_restores_a_stolen_focus
 test_kill_emptying_non_focused_uses_pane_death
 test_kill_focused_workspace_stays_plain_close
+test_kill_refuses_when_presentation_lock_is_unavailable
 test_projection_seeded_prune_refuses_active_tab
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order
