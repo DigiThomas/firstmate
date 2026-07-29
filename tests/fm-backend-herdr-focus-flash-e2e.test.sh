@@ -30,8 +30,16 @@ mkdir -p "$FAKEBIN"
 
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-herdr-focus-flash-regression-r1)
 export HERDR_LAB_HELPER HERDR_LAB_SESSION HERDR_ORIGINAL_PATH
+B_SAMPLER_PID=
+B_SAMPLER_STOP=
 cleanup() {
   local status=$?
+  if [ -n "$B_SAMPLER_STOP" ]; then
+    : > "$B_SAMPLER_STOP"
+  fi
+  if [ -n "$B_SAMPLER_PID" ]; then
+    wait "$B_SAMPLER_PID" 2>/dev/null || true
+  fi
   env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || status=1
   rm -rf "$TMP_ROOT"
   exit "$status"
@@ -123,7 +131,32 @@ B_SURVIVOR_ORDER=$(ws_order | tr ',' '\n' | grep -v "^$B_DOOMED_WS\$" | paste -s
   || fail 'could not capture the Part B survivor order'
 
 CALL_LOG="$TMP_ROOT/call.log"
+B_FOCUS_SAMPLES="$TMP_ROOT/focus.samples"
+B_OPERATION_ACTIVE="$TMP_ROOT/operation.active"
+B_SAMPLER_READY="$TMP_ROOT/sampler.ready"
+B_SAMPLER_STOP="$TMP_ROOT/sampler.stop"
 : > "$CALL_LOG"
+: > "$B_FOCUS_SAMPLES"
+(
+  : > "$B_SAMPLER_READY"
+  while [ ! -e "$B_SAMPLER_STOP" ]; do
+    if [ -e "$B_OPERATION_ACTIVE" ]; then
+      if B_SAMPLE=$(focus_snapshot); then
+        printf '%s\n' "$B_SAMPLE" >> "$B_FOCUS_SAMPLES"
+      else
+        printf '%s\n' UNREADABLE >> "$B_FOCUS_SAMPLES"
+      fi
+    fi
+  done
+) &
+B_SAMPLER_PID=$!
+B_READY_ATTEMPT=0
+while [ ! -e "$B_SAMPLER_READY" ] && [ "$B_READY_ATTEMPT" -lt 100 ]; do
+  sleep 0.01
+  B_READY_ATTEMPT=$((B_READY_ATTEMPT + 1))
+done
+[ -e "$B_SAMPLER_READY" ] || fail 'the Part B focus sampler did not start'
+: > "$B_OPERATION_ACTIVE"
 B_OUT=$(PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" FM_FLASH_CALL_LOG="$CALL_LOG" bash -c '
   . "$1/bin/backends/herdr.sh"
   fm_backend_herdr_cli() {
@@ -135,7 +168,16 @@ B_OUT=$(PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" FM_FLASH_CALL_LOG="$CALL_LOG" bash 
   fm_backend_herdr_projection_close_pane_focus_preserving "$2" "$3"
 ' _ "$ROOT" "$HERDR_LAB_SESSION" "$B_DOOMED_PANE" 2>&1)
 B_STATUS=$?
+rm -f "$B_OPERATION_ACTIVE"
+: > "$B_SAMPLER_STOP"
+wait "$B_SAMPLER_PID" 2>/dev/null || true
+B_SAMPLER_PID=
 [ "$B_STATUS" -eq 0 ] || fail "the production focus-preserving close failed (status $B_STATUS): $B_OUT"
+[ -s "$B_FOCUS_SAMPLES" ] || fail 'the Part B sampler captured no focus sample during the production close'
+B_WRONG_SAMPLE=$(grep -Fvx -- "$B_BEFORE" "$B_FOCUS_SAMPLES" | head -1)
+if [ -n "$B_WRONG_SAMPLE" ]; then
+  fail "the mitigation exposed a wrong or unreadable in-operation focus sample ($B_BEFORE -> $B_WRONG_SAMPLE)"
+fi
 wait_ws_gone "$B_DOOMED_WS" || fail 'the mitigation left the doomed workspace behind'
 if lab pane get "$B_DOOMED_PANE" >/dev/null 2>&1; then
   fail 'the mitigation left the doomed pane behind'
@@ -146,7 +188,7 @@ B_AFTER=$(focus_snapshot) || fail 'could not capture the Part B post-close focus
 [ "$(ws_order)" = "$B_SURVIVOR_ORDER" ] \
   || fail "the mitigation left a lasting workspace order change ($B_SURVIVOR_ORDER -> $(ws_order))"
 grep -q '^pane process-info' "$CALL_LOG" || fail 'the idle-shell proof never ran'
-pass 'mitigation: the doomed workspace was removed with the exact focus and survivor order preserved'
+pass 'mitigation: every in-operation sample preserved exact focus while the doomed workspace was removed'
 
 if [ "$STEAL_LIVE" = 1 ]; then
   grep -q '^tab focus' "$CALL_LOG" \

@@ -1308,9 +1308,10 @@ test_projection_close_death_still_restores_a_stolen_focus() {
 }
 
 test_kill_emptying_non_focused_uses_pane_death() {
-  local dir log resp fb out status bgpid
+  local dir log resp fb out status bgpid lock_log lock_held
   dir="$TMP_ROOT/kill-death"; mkdir -p "$dir/responses"
-  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  log="$dir/log"; resp="$dir/responses"; lock_log="$dir/lock.log"; lock_held="$dir/lock-held"
+  : > "$log"; : > "$lock_log"
   printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true},{"workspace_id":"w2","active_tab_id":"w2:t2","focused":false}]}}' > "$resp/1.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2","tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/3.out"
@@ -1327,13 +1328,36 @@ test_kill_emptying_non_focused_uses_pane_death() {
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_WORKSPACE_MOVER="$dir/mover" \
     FM_FAKE_MOVER_LOG="$dir/mover.log" FM_FAKE_MOVER_RESPONSE="$dir/no-response" \
-    FM_BACKEND_HERDR_DEATH_CLOSE_POLLS=2 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_kill fmtest:w2:p2' "$ROOT" 2>&1)
+    FM_BACKEND_HERDR_DEATH_CLOSE_POLLS=2 FM_FAKE_LOCK_LOG="$lock_log" \
+    FM_FAKE_LOCK_HELD="$lock_held" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_target_ready() { fm_backend_herdr_parse_target "$1"; }
+      fm_backend_herdr_presentation_session_lock_path() { printf "%s" "$FM_FAKE_LOCK_HELD.lock"; }
+      fm_lock_try_acquire() {
+        printf "acquire\n" >> "$FM_FAKE_LOCK_LOG"
+        : > "$FM_FAKE_LOCK_HELD"
+      }
+      fm_lock_release() {
+        [ -e "$FM_FAKE_LOCK_HELD" ] || return 1
+        rm -f "$FM_FAKE_LOCK_HELD"
+        printf "release\n" >> "$FM_FAKE_LOCK_LOG"
+      }
+      eval "$(declare -f fm_backend_herdr_cli | sed "1s/fm_backend_herdr_cli/fm_backend_herdr_cli_locked/")"
+      fm_backend_herdr_cli() {
+        [ -e "$FM_FAKE_LOCK_HELD" ] || return 97
+        fm_backend_herdr_cli_locked "$@"
+      }
+      fm_backend_herdr_kill fmtest:w2:p2
+    ' "$ROOT" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "an emptying non-focused kill should stay best-effort: $out"
+  [ "$(cat "$lock_log")" = "$(printf 'acquire\nrelease')" ] \
+    || fail "the generic kill did not hold one presentation lock across its complete mutation: $(cat "$lock_log")"
+  [ ! -e "$lock_held" ] || fail "the generic kill retained its presentation lock"
   assert_not_contains "$(cat "$log")" $'pane\x1fclose' "an emptying non-focused kill used the focus-unsafe explicit close"
   assert_not_contains "$(cat "$log")" $'tab\x1ffocus' "an emptying non-focused kill moved focus"
-  pass "fm_backend_herdr_kill: an emptying non-focused kill ends the exact shell without a focus change"
+  pass "fm_backend_herdr_kill: one session lock covers the focus-safe emptying removal"
 }
 
 test_kill_focused_workspace_stays_plain_close() {
@@ -1353,7 +1377,13 @@ test_kill_focused_workspace_stays_plain_close() {
     FM_HERDR_PS_BIN="$dir/ps" FM_BACKEND_HERDR_WORKSPACE_MOVER="$dir/mover" \
     FM_FAKE_MOVER_LOG="$dir/mover.log" FM_FAKE_MOVER_RESPONSE="$dir/no-response" \
     FM_BACKEND_HERDR_DEATH_CLOSE_POLLS=2 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_kill fmtest:w2:p2' "$ROOT" 2>&1)
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_presentation_session_lock_path() { printf "/tmp/fm-herdr-test-lock"; }
+      fm_lock_try_acquire() { return 0; }
+      fm_lock_release() { return 0; }
+      fm_backend_herdr_kill fmtest:w2:p2
+    ' "$ROOT" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "a focused-workspace kill should stay best-effort: $out"
   assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw2:p2' "a focused-workspace kill did not use the plain close"

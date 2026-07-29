@@ -2415,9 +2415,8 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
 # restore as the backstop. A close that empties the FOCUSED workspace moves
 # focus legitimately, and every ambiguity or failure falls back to the plain
 # close, matching the pre-hardening contract.
-fm_backend_herdr_kill() {  # <target>
-  fm_backend_herdr_target_ready "$1" || return 0
-  local session=$FM_BACKEND_HERDR_SESSION pane=$FM_BACKEND_HERDR_PANE
+fm_backend_herdr_kill_serialized() {  # <session> <pane>
+  local session=$1 pane=$2
   local before active_tab info target_pane target_tab target_ws plan shell_pid
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || before=
   if [ -n "$before" ]; then
@@ -2443,6 +2442,32 @@ fm_backend_herdr_kill() {  # <target>
     fi
   fi
   fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1 || true
+}
+
+fm_backend_herdr_kill() {  # <target>
+  fm_backend_herdr_target_ready "$1" || return 0
+  local session=$FM_BACKEND_HERDR_SESSION pane=$FM_BACKEND_HERDR_PANE
+  local lock_path attempt=0 lock_held=0
+  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh"
+  fi
+  if lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session"); then
+    while [ "$attempt" -lt 50 ]; do
+      if fm_lock_try_acquire "$lock_path"; then
+        lock_held=1
+        break
+      fi
+      sleep 0.1
+      attempt=$((attempt + 1))
+    done
+  fi
+  if [ "$lock_held" = 1 ]; then
+    fm_backend_herdr_kill_serialized "$session" "$pane"
+    fm_lock_release "$lock_path" || true
+  else
+    fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1 || true
+  fi
 }
 
 # fm_backend_herdr_classify_agent_status: map a raw `agent get` agent_status
