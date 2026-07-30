@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--branch <name>] [--allow-branch-collision] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#   --branch <name> declares the EXISTING branch this task will work, when it is
+#   not the ordinary per-task fm/<task-id> branch. Every ship/scout spawn refuses
+#   when another live session is already using the branch it resolves, and a
+#   brief that instructs a checkout of some other branch refuses until --branch
+#   states which one (bin/fm-branch-liveness.sh owns the detection and its
+#   fail-closed contract; data/decisions/concurrent-session-branch-collision.md
+#   owns why). --branch is per task, so a batch cannot share it.
+#   --allow-branch-collision dispatches anyway after such a refusal. It is the
+#   deliberate, recorded override: the warning still prints every finding and the
+#   task's meta keeps branch_collision_override=1. Never pass it by default.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -186,10 +196,13 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+BRANCH_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+BRANCH_SET=0
+ALLOW_BRANCH_COLLISION=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -202,6 +215,7 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      branch) BRANCH_ARG=$a; BRANCH_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -218,6 +232,9 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --branch) want_value=branch ;;
+    --branch=*) BRANCH_ARG=${a#--branch=}; BRANCH_SET=1 ;;
+    --allow-branch-collision) ALLOW_BRANCH_COLLISION=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -226,6 +243,7 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
+[ "$BRANCH_SET" -eq 0 ] || [ -n "$BRANCH_ARG" ] || { echo "error: --branch requires a non-empty value" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
@@ -386,8 +404,15 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
   fi
+  # --branch names ONE task's branch, so it is deliberately not shareable across
+  # a batch; each pair either takes the per-task default or is spawned singly.
+  if [ "$BRANCH_SET" -eq 1 ]; then
+    echo "error: --branch names a single task's branch; spawn an existing-branch task on its own, not in a batch" >&2
+    exit 1
+  fi
   rc=0
   shared_args=()
+  [ "$ALLOW_BRANCH_COLLISION" -eq 0 ] || shared_args+=(--allow-branch-collision)
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
@@ -861,6 +886,111 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 # once here so every downstream comparison uses the same physical form
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
+
+# --- concurrent-session branch guard ----------------------------------------
+#
+# Refuse to put a worker on a branch another live session is already working
+# (data/decisions/concurrent-session-branch-collision.md). The detection and its
+# fail-closed contract belong to bin/fm-branch-liveness.sh; this block owns only
+# which branch is checked, and the refusal.
+#
+# The branch checked is --branch when the caller declares an existing branch,
+# and the per-task fm/<id> branch otherwise. So that the declaration cannot be
+# forgotten, a brief that instructs a checkout of any OTHER branch refuses here
+# until the caller states the branch: agent memory is not the enforcement layer.
+brief_declared_branches() {  # print branches the brief tells the worker to check out
+  awk -v self="fm/$ID" '
+    {
+      line = $0
+      while (match(line, /git[[:space:]]+(checkout|switch)[[:space:]]+[^`|;&)]*/)) {
+        stmt = substr(line, RSTART, RLENGTH)
+        line = substr(line, RSTART + RLENGTH)
+        n = split(stmt, tok, /[[:space:]]+/)
+        for (i = 3; i <= n; i++) {
+          t = tok[i]
+          if (t == "" || t == "--" || substr(t, 1, 1) == "-") continue
+          gsub(/^[`"'"'"'(]+|[`"'"'"'.,]+$/, "", t)
+          if (t == "" || t == self || t ~ /^\$/ || t ~ /\{/) continue
+          print t
+          break
+        }
+      }
+    }
+  ' "$BRIEF" | LC_ALL=C sort -u
+}
+
+if [ "$KIND" != secondmate ]; then
+  BRANCH_TARGET=${BRANCH_ARG:-fm/$ID}
+  if [ "$BRANCH_SET" -eq 0 ]; then
+    UNDECLARED=$(brief_declared_branches)
+    if [ -n "$UNDECLARED" ]; then
+      {
+        echo "error: the brief for $ID instructs a checkout of a branch other than fm/$ID:"
+        printf '%s\n' "$UNDECLARED" | while IFS= read -r undeclared_branch; do
+          printf '  %s\n' "$undeclared_branch"
+        done
+        echo "Declare the branch this task will work with --branch <name> so the concurrent-session check runs against the right branch."
+      } >&2
+      exit 1
+    fi
+  fi
+  # fm/<task-id> is created by and for THIS task, so a worktree of this project
+  # already sitting on it is this task's own isolated copy - a respawn, or a
+  # worktree taken before the check - not another session. Ownership is the
+  # caller's to establish, so it is resolved here and handed to the detector,
+  # which stays a pure "is anyone live on this branch" question. A DECLARED
+  # existing branch is never treated this way: nothing about it belongs to us.
+  BRANCH_LIVENESS_EXCLUDES=()
+  if [ "$BRANCH_TARGET" = "fm/$ID" ]; then
+    wt_candidate=
+    while IFS= read -r wt_line; do
+      case "$wt_line" in
+        'worktree '*) wt_candidate=${wt_line#worktree } ;;
+        "branch refs/heads/$BRANCH_TARGET")
+          [ -z "$wt_candidate" ] || BRANCH_LIVENESS_EXCLUDES+=(--exclude "$wt_candidate")
+          ;;
+      esac
+    done < <(git -C "$PROJ_ABS_REAL" worktree list --porcelain 2>/dev/null)
+  fi
+  BRANCH_LIVENESS_RC=0
+  BRANCH_LIVENESS_OUT=$("$FM_ROOT/bin/fm-branch-liveness.sh" \
+    --repo "$PROJ_ABS_REAL" \
+    --branch "$BRANCH_TARGET" \
+    --home "$FM_HOME" \
+    --state "$STATE" \
+    --projects "$PROJECTS" \
+    ${BRANCH_LIVENESS_EXCLUDES[@]+"${BRANCH_LIVENESS_EXCLUDES[@]}"} 2>&1) || BRANCH_LIVENESS_RC=$?
+  case "$BRANCH_LIVENESS_RC" in
+    0) ;;
+    3|4)
+      if [ "$BRANCH_LIVENESS_RC" = 3 ]; then
+        BRANCH_LIVENESS_HEAD="another live session is already working branch $BRANCH_TARGET"
+      else
+        BRANCH_LIVENESS_HEAD="the concurrent-session check for branch $BRANCH_TARGET could not complete"
+      fi
+      if [ "$ALLOW_BRANCH_COLLISION" -eq 1 ]; then
+        {
+          echo "warning: $BRANCH_LIVENESS_HEAD; dispatching $ID anyway because --allow-branch-collision was passed"
+          printf '%s\n' "$BRANCH_LIVENESS_OUT"
+        } >&2
+      else
+        {
+          echo "error: refusing to spawn $ID: $BRANCH_LIVENESS_HEAD"
+          printf '%s\n' "$BRANCH_LIVENESS_OUT"
+          echo "Reconcile that work first, or re-run with --allow-branch-collision to dispatch anyway."
+        } >&2
+        exit 1
+      fi
+      ;;
+    *)
+      {
+        echo "error: refusing to spawn $ID: the concurrent-session check failed for branch $BRANCH_TARGET (exit $BRANCH_LIVENESS_RC)"
+        printf '%s\n' "$BRANCH_LIVENESS_OUT"
+      } >&2
+      exit 1
+      ;;
+  esac
+fi
 
 real_path_or_raw() {  # <path>
   local path=$1 real
@@ -1645,6 +1775,11 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
+  # Only a declared existing branch or a used collision override is recorded, so
+  # the ordinary per-task-branch spawn's meta stays byte-identical. An override
+  # that fired must stay visible in the durable record, not only in one stderr line.
+  [ "$BRANCH_SET" -eq 0 ] || echo "branch=$BRANCH_ARG"
+  [ "$ALLOW_BRANCH_COLLISION" -eq 0 ] || echo "branch_collision_override=1"
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 

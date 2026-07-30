@@ -34,6 +34,14 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Point the concurrent-session branch guard (bin/fm-branch-liveness.sh) at a
+# transcript root that does not exist, so suites unrelated to it neither read the
+# developer's real agent sessions nor depend on what happens to be live on the
+# machine. An absent root is a defined answer ("no agent sessions recorded"), not
+# a suppressed check: the guard's own suite sets this per invocation to fixture
+# roots and still exercises every detector.
+export FM_BRANCH_LIVENESS_SESSION_ROOT="${TMPDIR:-/tmp}/fm-test-absent-session-root"
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
