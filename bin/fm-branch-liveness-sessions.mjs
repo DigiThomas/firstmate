@@ -37,6 +37,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const TAIL_BYTES = 1024 * 1024;
+const MAX_TAIL_BYTES = 64 * 1024 * 1024;
 
 function die(code, message) {
   process.stderr.write(`${message}\n`);
@@ -62,32 +63,24 @@ function parseArgs(argv) {
   return out;
 }
 
-// Read at most the last TAIL_BYTES of a file. A transcript grows to megabytes,
+// Read the last `length` bytes of an open file. A transcript grows to megabytes,
 // and only its final records describe where the session is now.
-function readTail(file) {
-  const fd = fs.openSync(file, "r");
-  try {
-    const size = fs.fstatSync(fd).size;
-    const length = Math.min(size, TAIL_BYTES);
-    const start = size - length;
-    const buf = Buffer.alloc(length);
-    let read = 0;
-    while (read < length) {
-      const n = fs.readSync(fd, buf, read, length - read, start + read);
-      if (n <= 0) break;
-      read += n;
-    }
-    return { text: buf.subarray(0, read).toString("utf8"), truncated: start > 0 };
-  } finally {
-    fs.closeSync(fd);
+function readTail(fd, size, length) {
+  const start = size - length;
+  const buf = Buffer.alloc(length);
+  let read = 0;
+  while (read < length) {
+    const n = fs.readSync(fd, buf, read, length - read, start + read);
+    if (n <= 0) break;
+    read += n;
   }
+  return { text: buf.subarray(0, read).toString("utf8"), truncated: start > 0 };
 }
 
 // The last record in the tail that states where the session is. A record
 // without `gitBranch` still resolves the transcript: it means the session is not
 // on a branch, which is a definite answer, not a missing signal.
-function lastLocationRecord(file) {
-  const { text, truncated } = readTail(file);
+function scanTail(text, truncated) {
   const lines = text.split("\n");
   // A truncated read can slice the first line mid-object; it is never the last.
   const first = truncated ? 1 : 0;
@@ -113,6 +106,31 @@ function lastLocationRecord(file) {
     };
   }
   return null;
+}
+
+// A single record can be larger than the whole tail window - real transcripts
+// carry multi-megabyte tool results - and then the window holds nothing but a
+// fragment of it. Reporting that transcript as unreadable would refuse every
+// dispatch for the length of the activity window over a signal that is perfectly
+// readable, so the window grows until a complete record is found or the whole
+// file has been read. The growth is bounded: past MAX_TAIL_BYTES the transcript
+// is treated as unresolved, which keeps the fail-closed contract intact for a
+// transcript that genuinely exposes no location record.
+function lastLocationRecord(file) {
+  const fd = fs.openSync(file, "r");
+  try {
+    const size = fs.fstatSync(fd).size;
+    let length = Math.min(size, TAIL_BYTES);
+    for (;;) {
+      const { text, truncated } = readTail(fd, size, length);
+      const record = scanTail(text, truncated);
+      if (record) return record;
+      if (!truncated || length >= MAX_TAIL_BYTES) return null;
+      length = Math.min(size, length * 2, MAX_TAIL_BYTES);
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function listDir(dir) {

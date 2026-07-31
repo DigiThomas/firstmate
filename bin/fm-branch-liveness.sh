@@ -21,11 +21,9 @@
 #                     collision (repeatable). The path and everything under it is
 #                     excluded. --repo itself is always excluded, because the
 #                     fleet's own clone is read-only to it and no worker runs
-#                     there; --home additionally excludes that home and every
-#                     worktree recorded in its state/*.meta.
-#   --home <dir>      firstmate home whose state/*.meta records the caller's own
-#                     workers. Without it, no ownership exclusions are derived.
-#   --state <dir>     the home's state directory, when it is not <home>/state.
+#                     there; --home additionally excludes that home and its
+#                     project clones.
+#   --home <dir>      firstmate home, excluded along with its project clones.
 #   --projects <dir>  the home's project clones, when they are not <home>/projects.
 #   --verbose         also print CLEAR: lines for detectors that found nothing.
 #
@@ -74,10 +72,14 @@
 #             branch already exists locally, so ordinary dispatch onto a fresh
 #             per-task branch never touches the network.
 #
-# The caller's own workers are NOT collisions. They live in isolated worktrees of
-# the same repository by design, so every worktree recorded in the caller's own
-# state/*.meta, the caller's home, and the project clone are excluded before any
-# detector reports. Without that, every ordinary dispatch would refuse.
+# The caller's OWN work is not a collision. A worker lives in an isolated worktree
+# of the same repository by design, so the caller names the directories that
+# belong to the pending work with --exclude, and its home and project clones are
+# excluded with --home. Without that, every ordinary dispatch would refuse.
+# Which worktree belongs to the pending work is a question about the caller's own
+# task lifecycle, so this script never derives it: it reads no task metadata and
+# answers only "is anyone live on this branch". A worker of a DIFFERENT task is a
+# different live session and refuses like any other.
 #
 # Environment:
 #   FM_BRANCH_LIVENESS_WINDOW_MINUTES  activity window (default 60). A session
@@ -110,20 +112,18 @@ esac
 REPO=
 BRANCH=
 HOME_DIR=
-STATE_DIR=
 PROJECTS_DIR=
 VERBOSE=0
 EXCLUDES=()
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --repo|--branch|--home|--state|--projects|--exclude)
+    --repo|--branch|--home|--projects|--exclude)
       [ "$#" -ge 2 ] || { echo "error: $1 requires a value" >&2; exit 2; }
       case "$1" in
         --repo) REPO=$2 ;;
         --branch) BRANCH=$2 ;;
         --home) HOME_DIR=$2 ;;
-        --state) STATE_DIR=$2 ;;
         --projects) PROJECTS_DIR=$2 ;;
         --exclude) EXCLUDES+=("$2") ;;
       esac
@@ -132,7 +132,6 @@ while [ "$#" -gt 0 ]; do
     --repo=*) REPO=${1#--repo=}; shift ;;
     --branch=*) BRANCH=${1#--branch=}; shift ;;
     --home=*) HOME_DIR=${1#--home=}; shift ;;
-    --state=*) STATE_DIR=${1#--state=}; shift ;;
     --projects=*) PROJECTS_DIR=${1#--projects=}; shift ;;
     --exclude=*) EXCLUDES+=("${1#--exclude=}"); shift ;;
     --verbose) VERBOSE=1; shift ;;
@@ -315,18 +314,7 @@ for e in ${EXCLUDES[@]+"${EXCLUDES[@]}"}; do
 done
 if [ -n "$HOME_DIR" ]; then
   add_exclude "$HOME_DIR"
-  [ -n "$STATE_DIR" ] || STATE_DIR="$HOME_DIR/state"
   [ -n "$PROJECTS_DIR" ] || PROJECTS_DIR="$HOME_DIR/projects"
-fi
-if [ -n "$STATE_DIR" ]; then
-  for meta in "$STATE_DIR"/*.meta; do
-    [ -f "$meta" ] || continue
-    while IFS= read -r line; do
-      case "$line" in
-        worktree=*) add_exclude "${line#worktree=}" ;;
-      esac
-    done < "$meta"
-  done
 fi
 
 is_excluded() {  # <path>

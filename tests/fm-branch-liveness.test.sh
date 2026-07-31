@@ -154,27 +154,25 @@ test_own_worker_worktree_is_not_a_collision() {
   mkdir -p "$case_dir/sessions"
   write_transcript "$case_dir/sessions" own-crew-session "$worktree" "$BRANCH" "$((NOW - 60))"
 
-  # The control run first: with no home to derive ownership from, this fixture IS
-  # a refusal. That is what proves the pass below comes from the ownership
+  # The control run first: with no ownership evidence to exclude it, this fixture
+  # IS a refusal. That is what proves the pass below comes from the ownership
   # exclusion and not from the detector quietly seeing nothing.
-  out=$(run_liveness "$case_dir/sessions" --repo "$case_dir/clone-a" --branch "$BRANCH")
+  home="$case_dir/home"
+  mkdir -p "$home/state"
+  out=$(run_liveness "$case_dir/sessions" --repo "$case_dir/clone-a" --branch "$BRANCH" --home "$home")
   status=$?
   expect_code 3 "$status" "control: without ownership evidence the same fixture must refuse"
   assert_contains "$out" "own-crew-session" "control refusal must name the session"
 
-  home="$case_dir/home"
-  mkdir -p "$home/state"
-  fm_write_meta "$home/state/ownworker.meta" \
-    "window=firstmate:fm-ownworker" \
-    "endpoint_task_id=ownworker" \
-    "worktree=$worktree" \
-    "project=$case_dir/clone-a" \
-    "harness=claude" \
-    "kind=ship"
-  out=$(run_liveness "$case_dir/sessions" --repo "$case_dir/clone-a" --branch "$BRANCH" --home "$home")
+  # Which directory belongs to the pending work is the caller's answer, not the
+  # detector's, so the caller names it. test_task_own_worktree_on_its_branch_dispatches
+  # and test_sibling_worker_on_a_declared_branch_refuses prove fm-spawn derives
+  # that answer from the right record.
+  out=$(run_liveness "$case_dir/sessions" --repo "$case_dir/clone-a" --branch "$BRANCH" \
+    --home "$home" --exclude "$worktree")
   status=$?
-  expect_code 0 "$status" "firstmate's own recorded worktree must never read as a collision"
-  pass "a worker in the fleet's own recorded worktree is not a collision (control refuses)"
+  expect_code 0 "$status" "the caller's own worktree must never read as a collision"
+  pass "a worker in the caller's own excluded worktree is not a collision (control refuses)"
 }
 
 # The isolated worktrees firstmate's workers live in are worktrees of the SAME
@@ -194,6 +192,31 @@ test_sibling_workers_on_other_branches_are_clear() {
   status=$?
   expect_code 0 "$status" "an ordinary fresh per-task branch must dispatch cleanly"
   pass "sibling workers on their own branches never block an ordinary dispatch"
+}
+
+# A transcript record can be larger than the scanner's tail window - real
+# archives carry multi-megabyte tool results - and when it is the LAST record the
+# window holds nothing but a fragment of it. Reading that as "unreadable" would
+# refuse every dispatch, in every repository, for the whole activity window over a
+# signal that is perfectly readable.
+test_oversized_final_record_resolves() {
+  local case_dir dir filler out status
+  case_dir=$(make_repo oversized)
+  dir="$case_dir/sessions/oversized"
+  mkdir -p "$dir"
+  filler=$(head -c 1400000 /dev/zero | tr '\0' x)
+  {
+    printf '{"type":"custom-title","sessionId":"huge-session"}\n'
+    printf '{"type":"assistant","sessionId":"huge-session","cwd":"%s","gitBranch":"%s","timestamp":"%s","toolUseResult":"%s"}\n' \
+      "$case_dir/clone-b" "$BRANCH" "$(iso_utc "$((NOW - 60))")" "$filler"
+  } > "$dir/huge-session.jsonl"
+
+  out=$(run_liveness "$case_dir/sessions" --repo "$case_dir/clone-a" --branch "$BRANCH")
+  status=$?
+  expect_code 3 "$status" "a final record larger than the tail window must still resolve"
+  assert_contains "$out" "huge-session" "the refusal must name the session the oversized record carries"
+  assert_not_contains "$out" "no readable location" "a readable transcript must not report as unresolved"
+  pass "a final transcript record larger than the tail window resolves instead of failing closed"
 }
 
 # --- 3. the local-checkout detector -----------------------------------------
@@ -401,11 +424,76 @@ test_task_own_worktree_on_its_branch_dispatches() {
   pass "a task's own isolated copy on its own branch never blocks that task's dispatch"
 }
 
+# A DIFFERENT task's crewmate is another live session, and on a declared existing
+# branch that is exactly the push-rejection collision this guard exists to close.
+# The fleet's own records must never clear it: only the record of THIS task does.
+test_sibling_worker_on_a_declared_branch_refuses() {
+  local case_dir home sibling out status
+  case_dir=$(make_repo siblingdeclared)
+  home=$(spawn_home "$case_dir" guard-task-e5 "Work the existing branch.")
+  sibling="$case_dir/sibling-worker-worktree"
+  git -C "$case_dir/clone-a" worktree add -q "$sibling" "$BRANCH"
+  fm_write_meta "$home/state/sibling-task-a.meta" \
+    "window=firstmate:fm-sibling-task-a" \
+    "endpoint_task_id=sibling-task-a" \
+    "worktree=$sibling" \
+    "project=$case_dir/clone-a" \
+    "harness=claude" \
+    "kind=ship"
+  mkdir -p "$case_dir/sessions"
+  write_transcript "$case_dir/sessions" sibling-crew-session "$sibling" "$BRANCH" "$((NOW - 45))"
+
+  out=$(run_spawn "$case_dir/sessions" "$home" guard-task-e5 projects/alpha --harness claude \
+    --branch "$BRANCH")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a sibling crewmate live on the declared branch must refuse"
+  assert_contains "$out" "refusing to spawn guard-task-e5" "the refusal must name the refused task"
+  assert_contains "$out" "sibling-crew-session" "the refusal must name the sibling's live session"
+  assert_contains "$out" "$sibling" "the refusal must name where the sibling worker is working"
+  assert_absent "$home/state/guard-task-e5.meta" "a refused spawn must not record a task"
+
+  # The control: the very same worktree, recorded as THIS task's own copy, is a
+  # respawn rather than a sibling, and still dispatches.
+  rm -f "$home/state/sibling-task-a.meta"
+  fm_write_meta "$home/state/guard-task-e5.meta" \
+    "window=firstmate:fm-guard-task-e5" \
+    "endpoint_task_id=guard-task-e5" \
+    "worktree=$sibling" \
+    "project=$case_dir/clone-a" \
+    "harness=claude" \
+    "kind=ship"
+  out=$(run_spawn "$case_dir/sessions" "$home" guard-task-e5 projects/alpha --harness claude \
+    --branch "$BRANCH")
+  assert_not_contains "$out" "refusing to spawn guard-task-e5" \
+    "control: the task's own recorded worktree must not refuse its own respawn"
+  assert_contains "$out" "fake tmux refuses" "control: the respawn must reach the session provider"
+  pass "a sibling task's live worker refuses a declared-branch dispatch (the task's own respawn clears)"
+}
+
+# `git checkout -- <path>` and `git checkout HEAD~1 -- <path>` name paths and a
+# revision, not a branch. Reading either as a branch declaration would hard-refuse
+# the dispatch of any task whose brief explains how to discard or restore a file.
+test_pathspec_checkout_in_brief_is_not_a_declaration() {
+  local case_dir home out
+  case_dir=$(make_repo pathspec)
+  home=$(spawn_home "$case_dir" guard-task-f6 \
+"First action: create your branch: \`git checkout -b fm/guard-task-f6\`
+If an edit goes wrong, discard it with \`git checkout -- src/app/page.tsx\`,
+or restore the previous revision with \`git checkout HEAD~1 -- config/schema.sql\`.")
+
+  out=$(run_spawn "$case_dir/no-sessions" "$home" guard-task-f6 projects/alpha --harness claude)
+  assert_not_contains "$out" "instructs a checkout of a branch other than" \
+    "a pathspec checkout in the brief must not read as an undeclared branch"
+  assert_contains "$out" "fake tmux refuses" "the spawn must reach the session provider"
+  pass "a brief that discards or restores paths with git checkout is not a branch declaration"
+}
+
 test_collision_across_clones
 test_same_branch_name_in_another_repository_is_clear
 test_quiet_session_is_not_live
 test_own_worker_worktree_is_not_a_collision
 test_sibling_workers_on_other_branches_are_clear
+test_oversized_final_record_resolves
 test_checkout_activity_decides
 test_remote_head_never_seen_locally_refuses
 test_fresh_branch_never_touches_the_remote
@@ -413,3 +501,5 @@ test_unreadable_signals_fail_closed
 test_spawn_refuses_and_override_dispatches
 test_undeclared_brief_branch_refuses
 test_task_own_worktree_on_its_branch_dispatches
+test_sibling_worker_on_a_declared_branch_refuses
+test_pathspec_checkout_in_brief_is_not_a_declaration

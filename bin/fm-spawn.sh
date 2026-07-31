@@ -908,9 +908,16 @@ brief_declared_branches() {  # print branches the brief tells the worker to chec
         n = split(stmt, tok, /[[:space:]]+/)
         for (i = 3; i <= n; i++) {
           t = tok[i]
-          if (t == "" || t == "--" || substr(t, 1, 1) == "-") continue
           gsub(/^[`"'"'"'(]+|[`"'"'"'.,]+$/, "", t)
-          if (t == "" || t == self || t ~ /^\$/ || t ~ /\{/) continue
+          # Everything after the pathspec separator is a path, never a branch, so
+          # the separator ends this statement rather than being skipped over.
+          if (t == "--") break
+          if (t == "" || substr(t, 1, 1) == "-") continue
+          if (t == self || t ~ /^\$/ || t ~ /\{/) continue
+          # A revision is not a branch: `git checkout HEAD~1 -- <path>` restores
+          # paths and `git checkout <sha>` detaches, neither claims a branch.
+          if (t ~ /^HEAD([~^][0-9]*)*$/) continue
+          if (t ~ /^[0-9a-f]+$/ && length(t) >= 7 && length(t) <= 40) continue
           print t
           break
         }
@@ -934,13 +941,28 @@ if [ "$KIND" != secondmate ]; then
       exit 1
     fi
   fi
-  # fm/<task-id> is created by and for THIS task, so a worktree of this project
-  # already sitting on it is this task's own isolated copy - a respawn, or a
-  # worktree taken before the check - not another session. Ownership is the
-  # caller's to establish, so it is resolved here and handed to the detector,
-  # which stays a pure "is anyone live on this branch" question. A DECLARED
-  # existing branch is never treated this way: nothing about it belongs to us.
+  # Ownership is the caller's to establish, so it is resolved here and handed to
+  # the detector as plain --exclude paths, keeping the detector a pure "is anyone
+  # live on this branch" question. Only THIS task's own copies are excluded:
+  # a SIBLING task's worker is another live session, and on a declared existing
+  # branch it is exactly the collision this guard exists to refuse, so its
+  # worktree is never excluded here.
+  #
+  # This task's own copies are two: the worktree already recorded for it in
+  # state/<id>.meta (a respawn or a recovery of an existing task), and - only for
+  # the fm/<task-id> branch, which is created by and for this task - a worktree of
+  # this project already sitting on it, taken before the check ran.
   BRANCH_LIVENESS_EXCLUDES=()
+  if [ -f "$STATE/$ID.meta" ]; then
+    while IFS= read -r meta_line; do
+      case "$meta_line" in
+        worktree=*)
+          own_worktree=${meta_line#worktree=}
+          [ -z "$own_worktree" ] || BRANCH_LIVENESS_EXCLUDES+=(--exclude "$own_worktree")
+          ;;
+      esac
+    done < "$STATE/$ID.meta"
+  fi
   if [ "$BRANCH_TARGET" = "fm/$ID" ]; then
     wt_candidate=
     while IFS= read -r wt_line; do
@@ -957,7 +979,6 @@ if [ "$KIND" != secondmate ]; then
     --repo "$PROJ_ABS_REAL" \
     --branch "$BRANCH_TARGET" \
     --home "$FM_HOME" \
-    --state "$STATE" \
     --projects "$PROJECTS" \
     ${BRANCH_LIVENESS_EXCLUDES[@]+"${BRANCH_LIVENESS_EXCLUDES[@]}"} 2>&1) || BRANCH_LIVENESS_RC=$?
   case "$BRANCH_LIVENESS_RC" in
