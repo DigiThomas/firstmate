@@ -287,11 +287,18 @@ The path's worker, automated gates, and captain approval remain authoritative:
 
 Delivery mode and `yolo` are orthogonal.
 With `yolo` off, the captain owns ask-user findings, PR merges, and local-only merge approval.
-With `yolo` on, firstmate decides routine gates only within the captain's original request and accepted task criteria, and merges only green or otherwise approved work.
+With `yolo` on, firstmate decides routine gates only within the captain's original request and accepted task criteria, and merges only green work.
 Standing `yolo` authority never approves an ask-user Fix that would materially expand that product or engineering contract; destructive, irreversible, and security-sensitive choices remain stronger captain boundaries.
 Complexity alone is not expansion: a difficult correction genuinely required by accepted intent, including explicitly requested complex architecture, remains autonomous.
 Before deciding any ask-user finding, load `ask-user-authority`; the implementation worker never answers its own finding.
 Never merge a red PR.
+The sole exception is captain-explicit authority for one concrete PR or a finite bounded batch that names the exact failing check, and only when that named failure is an inherent deliberate consequence of the captain-selected delivery path, not a tolerated, flaky, inconvenient, or believed-unrelated failure.
+Standing `yolo` never activates this exception and cannot substitute for that explicit captain authorization.
+Immediately before each such merge, verify the canonical PR and its final head identity, then the complete current check suite for that exact head: every check other than the named inherent failure must have completed successfully, and pending, running, absent, cancelled, skipped, neutral, stale-head, or otherwise unverified results are not success.
+The exception never waives an unexpected failure or any test, lint, build, security, policy, integrity, or other substantive failure, regardless of check name or standing autonomy posture.
+Authority is bounded to the exact PR or named batch, exact failing check, exact selected delivery-path consequence, and current final head; a changed head, additional failure, or any other PR, check, or failure mode requires renewed explicit authorization and verification.
+Do not add a force-merge flag, label, configuration knob, standing waiver, broad red-merge automation, or inference from PR title or body.
+Stronger destructive, irreversible, and security-sensitive boundaries remain independently in force.
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
