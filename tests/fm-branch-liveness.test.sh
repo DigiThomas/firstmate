@@ -381,6 +381,52 @@ test_spawn_refuses_and_override_dispatches() {
   pass "the dispatch path refuses on a collision and dispatches only under the explicit override"
 }
 
+# The override is not only a stderr line. An overridden dispatch has to stay
+# visible in the task's durable record, or a later reader of state/<id>.meta
+# cannot tell a deliberate collision from an ordinary spawn.
+test_override_is_recorded_in_the_task_record() {
+  local case_dir home permissive worktree out status
+  case_dir=$(make_repo overriderecord)
+  mkdir -p "$case_dir/sessions"
+  write_transcript "$case_dir/sessions" recorded-collision-session "$case_dir/clone-b" "$BRANCH" "$((NOW - 30))"
+  home=$(spawn_home "$case_dir" guard-task-g7 "Work the existing branch.")
+  worktree="$case_dir/override-worktree"
+  git -C "$case_dir/clone-a" worktree add -q "$worktree" "origin/$BRANCH"
+
+  # This case is the one that has to run all the way through a spawn, so it
+  # needs a session provider that answers rather than the suite's deliberately
+  # refusing one.
+  permissive=$(fm_fakebin "$case_dir/permissive")
+  cat > "$permissive/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$permissive/tmux"
+  fm_fake_exit0 "$permissive" treehouse
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
+    FM_SPAWN_NO_GUARD=1 \
+    FM_BRANCH_LIVENESS_SESSION_ROOT="$case_dir/sessions" FM_BRANCH_LIVENESS_NOW="$NOW" \
+    TMUX="fake,1,0" FM_FAKE_PANE_PATH="$worktree" PATH="$permissive:$PATH" \
+    "$SPAWN" guard-task-g7 projects/alpha --harness claude --branch "$BRANCH" \
+    --allow-branch-collision 2>&1)
+  status=$?
+  expect_code 0 "$status" "the overridden dispatch must complete"
+  assert_contains "$out" "spawned guard-task-g7" "the overridden dispatch must report a spawn"
+  assert_grep "branch_collision_override=1" "$home/state/guard-task-g7.meta" \
+    "an overridden dispatch must stay visible in the task's durable record"
+  assert_grep "branch=$BRANCH" "$home/state/guard-task-g7.meta" \
+    "the branch the override was taken on must be recorded with it"
+  pass "an overridden dispatch records the override in the task's durable record"
+}
+
 # A brief that sends the worker onto some other branch must not be dispatchable
 # without saying which branch, or the guard would silently check fm/<id> instead.
 test_undeclared_brief_branch_refuses() {
@@ -499,6 +545,7 @@ test_remote_head_never_seen_locally_refuses
 test_fresh_branch_never_touches_the_remote
 test_unreadable_signals_fail_closed
 test_spawn_refuses_and_override_dispatches
+test_override_is_recorded_in_the_task_record
 test_undeclared_brief_branch_refuses
 test_task_own_worktree_on_its_branch_dispatches
 test_sibling_worker_on_a_declared_branch_refuses
