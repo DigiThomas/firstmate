@@ -95,6 +95,23 @@ fi
 if [ "${1:-}" = "display-message" ]; then
   case "$*" in
     *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
+    *session_name*)
+      # Endpoint presence is one identity record, verified against the target it
+      # was asked about, because real tmux answers an unknown target from the
+      # ACTIVE window instead of failing. Report the requested identity for the
+      # window this fake represents and a decoy for anything else.
+      _t=; _p=
+      for _a in "$@"; do [ "$_p" = -t ] && _t=$_a; _p=$_a; done
+      _t=${_t#=}
+      _want=${_t#*:}
+      _have=${FM_FAKE_TMUX_WINDOWS:-${FM_FAKE_TMUX_WINDOW#*:}}
+      if [ -z "$_have" ] || [ "$_have" = "$_want" ]; then
+        printf '%s\0370\037%s\0370\037%%1\037@0\n' "${_t%%:*}" "$_want"
+      else
+        printf '%s\0370\037fm-fake-active-window\0370\037%%1\037@0\n' "${_t%%:*}"
+      fi
+      exit 0
+      ;;
   esac
 fi
 exit 1

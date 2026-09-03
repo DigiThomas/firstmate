@@ -54,6 +54,18 @@ set -u
 case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_command*) printf '%s\n' '$comm'; exit 0 ;; esac; done
+    # The target-presence read asks for one identity record. This fake hosts
+    # whatever target it is asked about, so echo the request straight back; the
+    # cases that must NOT resolve use make_failed_probe_tmux below.
+    case "\$*" in
+      *session_name*)
+        _t=; _p=
+        for _a in "\$@"; do [ "\$_p" = -t ] && _t=\$_a; _p=\$_a; done
+        _t=\${_t#=}
+        printf '%s\0370\037%s\0370\037%%1\037@0\n' "\${_t%%:*}" "\${_t#*:}"
+        exit 0
+        ;;
+    esac
     exit 0 ;;
   list-windows) printf '%s\n' win; exit 0 ;;
 esac
@@ -74,6 +86,26 @@ make_failed_probe_tmux() {
 set -u
 case "\${1:-}" in
   display-message)
+    # Presence and the pane read are now the same primitive, so each inventory
+    # mode is expressed here: a target that resolves to a DIFFERENT window is
+    # the active-window fallback (missing), the confirmed session/server/socket
+    # failures keep their exact tmux error text (missing), and any other
+    # failure stays unreadable so it can never license a duplicate spawn.
+    case "\$*" in
+      *session_name*)
+        _t=; _p=
+        for _a in "\$@"; do [ "\$_p" = -t ] && _t=\$_a; _p=\$_a; done
+        _t=\${_t#=}
+        case '$inventory' in
+          missing) printf '%s\0370\037main\0370\037%%1\037@0\n' "\${_t%%:*}"; exit 0 ;;
+          missing-session) printf '%s\n' "can't find session: sess" >&2; exit 1 ;;
+          missing-server) printf '%s\n' "no server running on /tmp/tmux-test/default" >&2; exit 1 ;;
+          missing-socket) printf '%s\n' "error connecting to /tmp/tmux-test/default (No such file or directory)" >&2; exit 1 ;;
+          present) exit 1 ;;
+          *) printf '%s\n' "permission denied" >&2; exit 1 ;;
+        esac
+        ;;
+    esac
     [ '$inventory' = unreadable ] && { printf '%s\n' node; exit 0; }
     exit 1
     ;;
@@ -284,6 +316,31 @@ case "${1:-}" in
           ;;
       esac
     done
+    # Endpoint presence now comes from one identity record rather than a window
+    # inventory, so the modes are expressed here: `missing` answers with a
+    # DIFFERENT window (real tmux's active-window fallback), `unreadable` fails,
+    # and an endpoint that has been killed stops resolving.
+    case "$*" in
+      *session_name*)
+        _t=; _p=
+        for _a in "$@"; do [ "$_p" = -t ] && _t=$_a; _p=$_a; done
+        _t=${_t#=}
+        _w=${_t#*:}
+        _w=${_w#=}
+        case "$mode" in
+          missing) printf '%s\0370\037main\0370\037%%1\037@0\n' "${_t%%:*}"; exit 0 ;;
+          unreadable) exit 1 ;;
+          *)
+            if [ -e "${FM_TMUX_CALL_LOG:?}.killed" ]; then
+              printf '%s\0370\037main\0370\037%%1\037@0\n' "${_t%%:*}"
+            else
+              printf '%s\0370\037%s\0370\037%%1\037@0\n' "${_t%%:*}" "$_w"
+            fi
+            exit 0
+            ;;
+        esac
+        ;;
+    esac
     exit 0
     ;;
   list-windows)

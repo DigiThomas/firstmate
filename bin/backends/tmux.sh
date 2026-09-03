@@ -246,43 +246,73 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
-# fm_backend_tmux_window_presence: is the EXACT recorded window present in a
-# successful session inventory? Prints `present`, `missing`, or `unreadable`.
+# fm_backend_tmux_target_presence: the ONE owner of tmux target resolution for
+# this repo. Prints `present`, `missing`, or `unreadable` for any recorded
+# target, and every other tmux liveness read goes through it rather than
+# re-deriving its own approximation - the cheap probe in bin/fm-backend.sh, the
+# recovery-grade classifier below, and bin/fm-crew-state.sh's pane_readable.
+# Three separate approximations were the root cause of a family of defects:
+# each one parsed some target shape differently from tmux itself.
 #
-# This is the containment for tmux's active-window fallback: every `-t` pane
-# read (display-message, capture-pane) answers an ABSENT named target from the
-# client's active window instead of failing, so a raw pane read describes some
-# other pane entirely and can never answer "does this window exist?". Only a
-# `list-windows` inventory can, because it enumerates real windows rather than
-# resolving a target.
+# It RESOLVES the target through tmux and then VERIFIES what came back, rather
+# than reimplementing tmux's own precedence rules in shell. That direction is
+# the whole design: tmux resolves a target it cannot find by silently falling
+# back (to the session's active window, or to the active pane), so a raw read
+# describes some other pane while reporting success. Asking tmux to echo the
+# identity it actually reached, then checking that identity against what was
+# requested, catches every one of those fallbacks without the parser having to
+# know the rules. Verified on tmux 3.6b, all with exit status 0:
+#   session:absent-name  -> the session's active window
+#   session:absent-index -> the session's active window
+#   session:window.9     -> the window's active pane
+#   prefix:window        -> the LONGER session that prefix uniquely matches
+#   session:a:b          -> the session's active window
 #
-# It is one read-only tmux call: it starts no server (a client command other
-# than new-session fails when none is running - that failure is one of the
-# definitive `missing` responses matched below), spawns no process, and takes
-# no lock, so it is cheap enough for the passive probe in bin/fm-backend.sh as
-# well as for the recovery-grade classifier below.
+# Two rules matter beyond the fallback:
 #
-# The missing/unreadable split is the whole reason this is not a boolean: an
-# authoritatively absent window or session is `missing`, while any other
-# inventory failure - a garbled response, a permission error, an inventory that
-# could not be read at all - is `unreadable`, so a transient tmux problem never
-# licenses a duplicate spawn in the recovery paths.
-fm_backend_tmux_window_presence() {  # <target> -> present|missing|unreadable
-  local target=$1 session window windows inventory_status
+#   1. The session component is anchored with tmux's `=` exact-match form,
+#      because tmux otherwise accepts a unique session-name PREFIX: with only
+#      `alphalong` present, `-t alpha:win` resolves against it, while
+#      `-t =alpha:win` does not resolve at all. `=` is only valid on a
+#      session component, so a bare `%pane` or `@window` id is passed through
+#      unanchored.
+#   2. Window INDEX beats window NAME, and this parser must not invert that.
+#      Verified with index 0 named `zero` and index 1 named `0`: tmux resolves
+#      `amb:0` to INDEX 0. Verifying the resolved identity rather than
+#      searching an inventory preserves that automatically, so the answer is
+#      always about the window every other tmux call will actually reach. A
+#      name-first parser would be confidently wrong about a DIFFERENT window,
+#      which is worse than the fallback it set out to fix.
+#
+# The `missing` versus `unreadable` split is deliberate and load-bearing:
+# `missing` means authoritatively absent, `unreadable` means the target could
+# not be judged, and only the former may license recovery. Anything ambiguous
+# is therefore `unreadable`, never `missing` - see the trailing-dot rule below.
+fm_backend_tmux_target_presence() {  # <target> -> present|missing|unreadable
+  local target=${1#=} anchored resolved status sep
+  local r_session r_windex r_wname r_pindex r_pid r_wid
+  local session rest wpart ppart
+
+  [ -n "$target" ] || { printf 'unreadable'; return 0; }
   case "$target" in
-    *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
-    *:*) ;;
+    *:*:*|:*|*:) printf 'unreadable'; return 0 ;;
+    [%@]*) anchored=$target ;;
+    *:*) anchored="=$target" ;;
+    # A bare string with no session component and no id sigil is ambiguous:
+    # tmux would answer it from whatever session happens to be current, so it
+    # names no specific endpoint and is never authoritative.
     *) printf 'unreadable'; return 0 ;;
   esac
-  session=${target%%:*}
-  window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
-    inventory_status=0
+
+  sep=$(printf '\037')
+  if resolved=$(tmux display-message -p -t "$anchored" \
+      "#{session_name}$sep#{window_index}$sep#{window_name}$sep#{pane_index}$sep#{pane_id}$sep#{window_id}" 2>&1); then
+    status=0
   else
-    inventory_status=$?
+    status=$?
   fi
-  if [ "$inventory_status" -ne 0 ]; then
-    case "$windows" in
+  if [ "$status" -ne 0 ]; then
+    case "$resolved" in
       *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
         printf 'missing'
         ;;
@@ -292,21 +322,67 @@ fm_backend_tmux_window_presence() {  # <target> -> present|missing|unreadable
     esac
     return 0
   fi
-  if printf '%s\n' "$windows" | grep -Fqx "$window"; then
-    printf 'present'
-  else
-    printf 'missing'
-  fi
+
+  IFS=$sep read -r r_session r_windex r_wname r_pindex r_pid r_wid <<EOF
+$resolved
+EOF
+  # A target tmux cannot resolve at all still exits 0, printing empty fields.
+  [ -n "$r_pid" ] || { printf 'missing'; return 0; }
+
+  case "$target" in
+    %*)
+      [ "$target" = "$r_pid" ] && { printf 'present'; return 0; }
+      ;;
+    @*)
+      [ "$target" = "$r_wid" ] && { printf 'present'; return 0; }
+      ;;
+    *:*)
+      session=${target%%:*}
+      rest=${target#*:}
+      [ "$session" = "$r_session" ] || { printf 'missing'; return 0; }
+      if [ "$rest" = "$r_windex" ] || [ "$rest" = "$r_wname" ]; then
+        printf 'present'
+        return 0
+      fi
+      # Only NOW consider a trailing `.suffix` a pane selector, and only when
+      # it cannot also be part of a window name. tmux splits at the dot itself:
+      # `session:fm-task.a` reaches window `fm-task` even when a window named
+      # `fm-task.a` exists alongside it, so blindly stripping at the last dot
+      # confirms presence about the wrong window. A pane selector is an index
+      # or a `%id`; anything else leaves the target ambiguous, which is
+      # `unreadable` rather than `missing` so it can never license a duplicate.
+      case "$rest" in
+        *.*)
+          wpart=${rest%.*}
+          ppart=${rest##*.}
+          case "$ppart" in
+            ''|*[!0-9]*)
+              case "$ppart" in
+                %[0-9]*) ;;
+                *) printf 'unreadable'; return 0 ;;
+              esac
+              ;;
+          esac
+          if { [ "$wpart" = "$r_windex" ] || [ "$wpart" = "$r_wname" ]; } \
+            && { [ "$ppart" = "$r_pindex" ] || [ "$ppart" = "$r_pid" ]; }; then
+            printf 'present'
+            return 0
+          fi
+          ;;
+      esac
+      ;;
+  esac
+  printf 'missing'
 }
 
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
 # shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
-# the empirical basis. Tmux silently falls back to the active window when a
-# named target is absent, so the exact recorded window must appear in a
-# successful session inventory before its foreground command can be trusted;
-# fm_backend_tmux_window_presence above owns that check and its
-# missing-versus-unreadable split.
+# the empirical basis. Tmux silently falls back when a target does not resolve,
+# so the target must be proven to reach the exact recorded endpoint before its
+# foreground command can be trusted; fm_backend_tmux_target_presence above owns
+# that resolution and its missing-versus-unreadable split, and every pane read
+# below addresses the same string tmux just resolved.
 #
 # The verdict combines two independent name sources rather than trusting either
 # alone. Either source naming a verified harness is enough for `alive`, because
@@ -317,7 +393,7 @@ fm_backend_tmux_window_presence() {  # <target> -> present|missing|unreadable
 fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm
   local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
-  case "$(fm_backend_tmux_window_presence "$target")" in
+  case "$(fm_backend_tmux_target_presence "$target")" in
     present) ;;
     missing) printf 'missing'; return 0 ;;
     *) printf 'unreadable'; return 0 ;;

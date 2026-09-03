@@ -828,9 +828,9 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # probe). A gone tmux window or an unqueryable herdr pane (server down, pane
 # closed), missing zellij pane, or unreadable Orca terminal simply fails, which
 # IS "does not exist" for this purpose.
-# Mirrors fm-crew-state.sh's pane_readable check; exists here as one shared
-# primitive so callers that only need a fast alive/dead read (recovery
-# digests, the session-start fleet digest) do not re-derive it inline.
+# This is the one shared primitive for callers that need a fast alive/dead read
+# (recovery digests, the session-start fleet digest); fm-crew-state.sh's
+# pane_readable now dispatches through it rather than carrying its own copy.
 #
 # WHY THIS COLLAPSES `unreadable` INTO FALSE, while the recovery-grade
 # fm_backend_agent_state below deliberately does not: the two answers buy
@@ -843,54 +843,26 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # unreadable backend degrading to "treat it as gone" costs at most a retry,
 # which every one of those callers already performs. `fm_backend_agent_state`
 # is the one whose verdict CAN license a relaunch onto a live worktree, which
-# is exactly why it keeps `missing` and `unreadable` apart. Any future caller
-# that wants to act destructively on a negative must use that classifier
-# instead of widening this boolean.
+# is exactly why it keeps `missing` and `unreadable` apart, and why an
+# ambiguous target resolves to `unreadable` there rather than `missing`. Any
+# future caller that wants to act destructively on a negative must use that
+# classifier instead of widening this boolean.
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      # Exit status alone cannot answer this. Verified on tmux 3.6b: EVERY
-      # unresolvable target still exits 0 - an absent pane or window id
-      # (`%999`, `@999`) and a bare absent window name print an empty line,
-      # and `session:absent-window` prints the CLIENT'S ACTIVE window, because
-      # tmux resolves a named target it cannot find by falling back instead of
-      # failing. The old status-only read therefore could not return false at
-      # all, and the session-start fleet digest reported a torn-down crewmate
-      # as alive indefinitely.
+      # One question, one owner: fm_backend_tmux_target_presence
+      # (bin/backends/tmux.sh) resolves the target through tmux and verifies
+      # the identity that came back. Nothing about tmux target shapes is
+      # decided here, because three separate approximations of that parsing -
+      # this probe, the recovery classifier, and fm-crew-state.sh's
+      # pane_readable - were the root cause of a family of false alive/dead
+      # answers.
       #
-      # Two containments, matched to the two shapes:
-      #   - `session:window` is the shape the name fallback applies to, so the
-      #     exact window must appear in a successful session inventory first.
-      #     fm_backend_tmux_window_presence (bin/backends/tmux.sh) already owns
-      #     that inventory for the recovery-grade classifier; reuse it rather
-      #     than growing a second copy that can drift. It adds one read-only
-      #     tmux call that starts no server, spawns no process, and takes no
-      #     lock, so this stays a passive probe.
-      #   - tmux's own `%pane` and `@window` ids, and a bare window name,
-      #     address no session inventory to check, so they are settled by
-      #     requiring the pane read to actually PRODUCE a pane id. That check
-      #     is what covers the supervisor pane targets, which are `%N` handles
-      #     taken from $TMUX_PANE rather than names.
+      # It stays a passive probe: one read-only tmux call that starts no
+      # server, spawns no process, and takes no lock.
       fm_backend_source tmux || return 1
-      case "$target" in
-        [%@]*|*:*:*) ;;
-        ?*:[%@]*) ;;
-        ?*:?*)
-          if [ "$(fm_backend_tmux_window_presence "$target")" != present ]; then
-            # `session:window.pane` is a legal target whose window part is not
-            # an inventory name. A window name may itself contain a dot, so the
-            # full name is tried first and this only retries with a trailing
-            # pane suffix removed; anything still absent is genuinely absent.
-            case "${target#*:}" in
-              *.*) [ "$(fm_backend_tmux_window_presence "${target%.*}")" = present ] || return 1 ;;
-              *) return 1 ;;
-            esac
-          fi
-          ;;
-      esac
-      pane=$(tmux display-message -p -t "$target" '#{pane_id}' 2>/dev/null) || return 1
-      [ -n "$pane" ]
+      [ "$(fm_backend_tmux_target_presence "$target")" = present ]
       ;;
     herdr)
       fm_backend_source herdr || return 1
