@@ -911,10 +911,17 @@ install_identity_probe() {  # <dir>
   real_ps=$(command -v ps) || fail "no ps on PATH for the attach identity probe"
   mkdir -p "$dir/noproc"
   : > "$dir/ps-probe.log"
+  # The probe row is written AFTER the real ps has answered, never before it.
+  # Logging first only proves the arm was about to look; the test then kills the
+  # holder while that very ps is still running, fm_pid_identity reads an empty
+  # answer, and the arm skips the attach path the case exists to exercise.
   cat > "$dir/fakebin/ps" <<SH
 #!/usr/bin/env bash
+ps_out=\$("$real_ps" "\$@")
+ps_rc=\$?
 printf '%s\n' "\$*" >> "$dir/ps-probe.log"
-exec "$real_ps" "\$@"
+[ -z "\$ps_out" ] || printf '%s\n' "\$ps_out"
+exit "\$ps_rc"
 SH
   chmod +x "$dir/fakebin/ps"
 }
@@ -1036,7 +1043,7 @@ test_arm_refuses_to_attach_to_a_dying_watcher() {
   # The holder dies only AFTER the arm has demonstrably read the lock, so the
   # ordering is caused rather than timed: a sleep budget racing arm startup would
   # let a loaded machine skip the attach path entirely and fail on the fixture.
-  local row dir state fakebin armout holder armpid lock_pid started_pid i
+  local row dir state fakebin armout holder armpid lock_pid started_pid settled i
   for row in restart no-restart; do
     dir=$(make_case "arm-dying-attach-$row")
     state="$dir/state"
@@ -1083,16 +1090,32 @@ test_arm_refuses_to_attach_to_a_dying_watcher() {
       || fail "arm ($row) did not restore supervision with a fresh watcher: $(cat "$armout")"
     [ "$started_pid" != "$holder" ] \
       || fail "arm ($row) restored supervision onto the dead holder itself: $(cat "$armout")"
-    if kill -0 "$started_pid" 2>/dev/null; then
+    # The fresh watcher and the arm's report of it do not settle at the same
+    # instant, so this samples a SETTLED state rather than whichever moment the
+    # ledger row happened to land in. A cycle that has already ended on a
+    # delivered wake still answers a bare `kill -0` while it is a zombie, and its
+    # lock is released before the arm writes that wake line - reading either fact
+    # on its own is a coin flip, not an assertion. Both endings prove the same
+    # thing: the fresh watcher is confirmably live, owns the lock, and is named by
+    # the started line, or the arm published the wake its cycle delivered.
+    i=0
+    settled=
+    while [ "$i" -lt 200 ]; do
       lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
-      [ "$lock_pid" = "$started_pid" ] \
-        || fail "arm ($row) reported a live watcher that does not own the lock (lock '$lock_pid')"
-      grep -qF "watcher: started pid=$started_pid" "$armout" \
-        || fail "arm ($row) started line did not name the confirmed live watcher"
-    else
-      grep -qE '^(signal:|stale:|check:|heartbeat)' "$armout" \
-        || fail "arm ($row) fresh watcher ended without delivering a wake: $(cat "$armout")"
-    fi
+      if is_live_non_zombie "$started_pid" && [ "$lock_pid" = "$started_pid" ] \
+        && grep -qF "watcher: started pid=$started_pid" "$armout" 2>/dev/null; then
+        settled=live
+        break
+      fi
+      if grep -qE '^(signal:|stale:|check:|heartbeat)' "$armout" 2>/dev/null; then
+        settled=delivered
+        break
+      fi
+      sleep 0.1
+      i=$((i + 1))
+    done
+    [ -n "$settled" ] \
+      || fail "arm ($row) fresh watcher neither confirmably held the lock nor delivered a wake (lock '$lock_pid'): $(cat "$armout")"
     kill "$armpid" "$started_pid" 2>/dev/null || true
     wait "$armpid" 2>/dev/null || true
   done
