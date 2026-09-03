@@ -88,6 +88,23 @@ fm_backend_tmux_container_ensure() {
 # lost, so worktree discovery cannot fall back to the active client's window.
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
   local ses=$1 wname=$2 proj_abs=$3 wid
+  # A dot in the window name makes the endpoint unaddressable, so refuse to
+  # create one at all rather than hand back a target tmux cannot reach. tmux
+  # splits a target at the dot and treats the tail as a PANE selector: with
+  # windows `fm-task` and `fm-task.a` both present, `-t sess:fm-task.a`
+  # resolves to `fm-task` (verified on tmux 3.6b). Every read and write on the
+  # recorded target then addresses the wrong window - a steer would be typed
+  # into another worker's pane - and fm_backend_tmux_target_presence reports
+  # `unreadable` because it cannot confirm the identity it asked for. Task ids
+  # may legally contain a dot (fm_task_id_path_safe in bin/fm-pr-lib.sh permits
+  # one), so this is the boundary that keeps such an id from ever reaching a
+  # tmux window name. Same refusal shape as the duplicate-name check below.
+  case "$wname" in
+    *.*)
+      echo "error: tmux window name '$wname' contains a dot, which tmux parses as a pane selector; use a task id without a dot on the tmux backend" >&2
+      return 1
+      ;;
+  esac
   if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
     return 1
@@ -353,6 +370,18 @@ EOF
       # confirms presence about the wrong window. A pane selector is an index
       # or a `%id`; anything else leaves the target ambiguous, which is
       # `unreadable` rather than `missing` so it can never license a duplicate.
+      #
+      # KNOWN LIMIT, and why it is bounded rather than open: a window whose own
+      # NAME contains a dot can be confirmed only while no window is named by
+      # its dot-prefix. Verified on tmux 3.6b: with `fm-task.a` alone the target
+      # resolves to itself and reads `present`; add a window named `fm-task` and
+      # the same target resolves to `fm-task`, so this reads `unreadable` and
+      # the dotted endpoint can never be confirmed alive - it is also invisible
+      # to stale detection, since that keys on a confirmed-gone endpoint. The
+      # limit is contained at the source: fm_backend_tmux_create_task above
+      # refuses to create a dotted window name at all, so no tmux task endpoint
+      # can enter this state. Do not "fix" this by preferring the prefix window,
+      # which would confirm liveness about a different worker's pane.
       case "$rest" in
         *.*)
           wpart=${rest%.*}
