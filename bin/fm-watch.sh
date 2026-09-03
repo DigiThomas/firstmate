@@ -1688,9 +1688,10 @@ while :; do
     rejected_checks=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
-      WATCH_STEP="check:$(basename "$c")"
+      check_name=$(basename "$c")
+      WATCH_STEP="check:$check_name"
       is_pr_poll=0
-      if [ "$(basename "$c")" = x-watch.check.sh ]; then
+      if [ "$check_name" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
           FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1

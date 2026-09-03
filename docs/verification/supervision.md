@@ -513,6 +513,15 @@ Against the current scripts the dying target is never announced and the arm rest
 The retarget case additionally asserts that the retargeted line carries its verification window, because an arm that simply never restarts satisfies every other assertion in it and the case would otherwise stop discriminating.
 The lock-refusal case additionally shows the arm naming `watcher cycle exited 1 during lock-acquire` on stdout while replaying the watcher's own `heartbeat is stale` explanation on stderr.
 
+A fifth case covers the lock-publication window that sits underneath the retarget case, and was verified on 2026-09-03 on the same host against the arm as it stood before the settling classification was added:
+
+```text
+ok - arm waits out a settling lock successor instead of restarting over it
+```
+
+Against that earlier arm the case fails with `not ok - arm treated a settling lock successor as a failed attach: watcher: restarting after a failed attach - attach target pid=<N> stopped verifying as this home's live watcher within 6s (pid alive, beacon 0s)`, which is the harm itself: the lock pid was alive and the arm restarted over it anyway, and `--restart` opens by sending TERM to exactly that pid.
+The retarget case cannot reach this state, because it hands the lock between two holders that already share one published identity, so its successor is healthy on the first sample and the publication gap never exists.
+
 The phase names in that line come from `WATCH_STEP` assignments that cover every phase of the poll loop, including the phases added upstream since this change was first written (`secondmate-wake-stall`, `procevent-tick`, `downtime-resurface`, and `inactive-outcome-scan`), so a cycle that exits inside one of them is still reportable from its failure line alone.
 
 Deterministic entry points:

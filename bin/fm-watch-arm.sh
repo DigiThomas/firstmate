@@ -78,7 +78,11 @@
 # that same gate is not a failed attach at all - that successor is healthy, and
 # `--restart` would TERM it - so the arm retargets onto it and verifies it from
 # scratch, bounded by FM_ARM_ATTACH_RETARGET_MAX so a flapping lock cannot loop
-# forever. Past the window the attached poll keeps re-checking the same three
+# forever. A lock whose pid is live but whose identity is not published yet is
+# that same successor caught mid-claim: it is SETTLING, not unhealthy, so the
+# window keeps polling instead of restarting over it, while a dead pid, a foreign
+# home, or a published identity that does not match still fails fast.
+# Past the window the attached poll keeps re-checking the same three
 # facts every FM_ARM_ATTACH_POLL, so a later death is caught within one poll.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
@@ -304,6 +308,38 @@ healthy_watcher() {
   HEALTHY_IDENTITY=$FM_WATCHER_HEALTHY_IDENTITY
 }
 
+# Not-healthy is two different observations, and only one of them is a failure.
+# fm_lock_claim publishes the lock's pid the moment the claim is taken, while the
+# claiming watcher writes fm-home, watcher-path and pid-identity afterwards, so a
+# brand new healthy watcher is briefly visible as a live lock pid with no
+# published identity yet. That is SETTLING, and it must not end an attach: the
+# only recovery an attach failure has is --restart, whose first act is TERM on
+# the current lock pid, which here is the healthy successor. Name the state
+# positively rather than waiting the window out and hoping timing separates it -
+# a dead or absent lock pid, a lock that already names another home or another
+# watcher path, and a fully published identity that does not match are all
+# genuinely UNHEALTHY and must still fail fast. Sets ATTACH_SETTLING_PID.
+ATTACH_SETTLING_PID=
+attach_lock_settling() {
+  local lock_pid lock_home lock_path lock_identity
+  ATTACH_SETTLING_PID=
+  lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  case "$lock_pid" in ''|*[!0-9]*) return 1 ;; esac
+  fm_pid_alive "$lock_pid" || return 1
+  lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
+  lock_path=$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)
+  lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
+  # Published-and-wrong is a mismatch, not an incomplete publication.
+  [ -z "$lock_home" ] || [ "$lock_home" = "$FM_HOME" ] || return 1
+  [ -z "$lock_path" ] || [ "$lock_path" = "$WATCH" ] || return 1
+  # All three published means the identity question is already answered, so the
+  # failure healthy_watcher just reported is about identity or the beacon.
+  if [ -n "$lock_home" ] && [ -n "$lock_path" ] && [ -n "$lock_identity" ]; then
+    return 1
+  fi
+  ATTACH_SETTLING_PID=$lock_pid
+}
+
 # Bounded post-attach verification. A single healthy read proves the target was
 # alive RECENTLY; it does not prove the target is alive now, and a beacon still
 # inside the grace can coexist with no watcher process at all. Keep re-checking
@@ -321,9 +357,25 @@ attach_verified() {  # <pid>
   ATTACH_VERIFY_BEACON_ADVANCED=0
   ATTACH_VERIFIED_PID=$pid
   before=$(fm_path_mtime "$BEAT" 2>/dev/null || true)
-  deadline=$(( $(date +%s) + ATTACH_VERIFY ))
+  # date(1) exposes whole seconds. Add one rounding second so the window cannot
+  # collapse to a fraction of the configured budget when it opens just before the
+  # next second boundary, which would make the reported "verified Ns" a claim the
+  # arm did not actually hold.
+  deadline=$(( $(date +%s) + ATTACH_VERIFY + 1 ))
   while :; do
     if ! healthy_watcher; then
+      if attach_lock_settling; then
+        # A live claimant that has not finished publishing its identity is not a
+        # failed attach. Keep polling inside the window; the deadline still bounds
+        # a lock that never finishes settling into an honest failure.
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+          HEALTHY_PID=$pid
+          ATTACH_VERIFY_REASON="the watcher lock holder pid=$ATTACH_SETTLING_PID never finished publishing this home's watcher identity within ${ATTACH_VERIFY}s (pid $(pid_liveness "$ATTACH_SETTLING_PID"), beacon $(fm_path_age "$BEAT")s)"
+          return 1
+        fi
+        sleep 0.1
+        continue
+      fi
       HEALTHY_PID=$pid
       ATTACH_VERIFY_REASON="attach target pid=$pid stopped verifying as this home's live watcher within ${ATTACH_VERIFY}s (pid $(pid_liveness "$pid"), beacon $(fm_path_age "$BEAT")s)"
       return 1
@@ -344,7 +396,7 @@ attach_verified() {  # <pid>
       ATTACH_VERIFIED_PID=$pid
       ATTACH_VERIFY_BEACON_ADVANCED=0
       before=$(fm_path_mtime "$BEAT" 2>/dev/null || true)
-      deadline=$(( $(date +%s) + ATTACH_VERIFY ))
+      deadline=$(( $(date +%s) + ATTACH_VERIFY + 1 ))
       continue
     fi
     now=$(fm_path_mtime "$BEAT" 2>/dev/null || true)
@@ -369,8 +421,8 @@ pid_liveness() {  # <pid>
 
 queued_wake_count() {
   local n
-  [ -f "$STATE/.wake-queue" ] || { printf '0'; return; }
-  n=$(wc -l < "$STATE/.wake-queue" 2>/dev/null | tr -d '[:space:]')
+  [ -f "$FM_WAKE_QUEUE" ] || { printf '0'; return; }
+  n=$(wc -l < "$FM_WAKE_QUEUE" 2>/dev/null | tr -d '[:space:]')
   case "$n" in ''|*[!0-9]*) n=0 ;; esac
   printf '%s' "$n"
 }
