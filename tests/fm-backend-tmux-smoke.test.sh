@@ -167,7 +167,7 @@ state=$(fm_backend_agent_state tmux "$TARGET")
   || fail "a real missing window in a readable session should classify as missing, got '$state'"
 # Best-effort contract: killing an already-gone window must not error.
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
-pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"
+pass "real tmux: kill removes the window, the killed target resolves to the active window, and the identity comparison rejects it as missing"
 
 cleanup_all
 trap - EXIT

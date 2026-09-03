@@ -141,6 +141,10 @@ SH
 # empty. Env knobs:
 #   FM_FAKE_TMUX_SEND_FAIL=1  send-keys exits 1
 #   FM_FAKE_TMUX_COMPOSER=pending  capture-pane shows leftover composer text
+#   FM_FAKE_TMUX_WINDOWS=<name>  names the ad hoc window this fake hosts
+#     (default win) alongside the windows this home's task records declare.
+#     Any other target gets the active-window decoy identity, so the
+#     target-presence read rejects it.
 fm_test_fake_tmux_send() {
   local fakebin=$1
   cat > "$fakebin/tmux" <<'SH'
