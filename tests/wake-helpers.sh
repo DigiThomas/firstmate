@@ -104,7 +104,8 @@ if [ "${1:-}" = "display-message" ]; then
       for _a in "$@"; do [ "$_p" = -t ] && _t=$_a; _p=$_a; done
       _t=${_t#=}
       _want=${_t#*:}
-      _have=${FM_FAKE_TMUX_WINDOWS:-${FM_FAKE_TMUX_WINDOW#*:}}
+      _have=${FM_FAKE_TMUX_WINDOWS:-${FM_FAKE_TMUX_WINDOW:-}}
+      _have=${_have#*:}
       if [ -z "$_have" ] || [ "$_have" = "$_want" ]; then
         printf '%s\0370\037%s\0370\037%%1\037@0\n' "${_t%%:*}" "$_want"
       else

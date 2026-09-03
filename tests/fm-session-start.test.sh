@@ -321,6 +321,11 @@ case "\${1:-}" in
       prev="\$a"
     done
     target=\${target#=}
+    # A designated target models a NON-AUTHORITATIVE read failure: tmux exits
+    # non-zero without any of the "can't find session" wording that proves
+    # absence, so the target can only be judged unreadable.
+    [ -n "\${FM_FAKE_TMUX_UNREADABLE_TARGET:-}" ] \\
+      && [ "\$target" = "\$FM_FAKE_TMUX_UNREADABLE_TARGET" ] && exit 1
     # An unknown SESSION resolves to nothing at all; an unknown window inside a
     # known session is what falls back to the active window.
     case "\$target" in
@@ -1316,8 +1321,11 @@ EOF
     "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: endpoint probe unreadable (backend=tmux)" \
     "session start did not distinguish transient unreadability from absence"
   [ ! -s "$log" ] || fail "session start touched a transiently unreadable target: $(cat "$log")"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
-    "the later cheap presence read should preserve the visible offline symptom"
+  assert_contains "$out" \
+    "endpoint: unreadable - could not be read, not confirmed gone (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+    "the later cheap presence read should surface the offline symptom without claiming the endpoint is gone"
+  assert_not_contains "$out" "endpoint: dead (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+    "the digest declared a transiently unreadable endpoint dead"
   pass "session start: transient tmux unreadability never licenses a relaunch"
 }
 
@@ -1372,12 +1380,33 @@ EOF
 
   printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-live.meta"
   printf 'window=fm-sess:dead-window\nkind=ship\n' > "$home/state/task-dead.meta"
+  # A multi-colon recorded target names no window tmux can be asked about, so
+  # the adapter refuses to judge it rather than calling it absent.
+  printf 'window=fm-sess:multi:colon\nkind=ship\n' > "$home/state/task-shape.meta"
+  # A non-authoritative read failure on a well-shaped target is the other way
+  # in: the read broke, which is not evidence the window is gone.
+  printf 'window=fm-sess:flaky-window\nkind=ship\n' > "$home/state/task-flaky.meta"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(FM_FAKE_TMUX_UNREADABLE_TARGET=fm-sess:flaky-window \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported alive"
   assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:dead-window)" "dead tmux endpoint not reported dead"
 
-  pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one"
+  # The digest is the one endpoint verdict a human acts on, and AGENTS.md's
+  # stuck-crewmate-recovery trigger keys on a dead endpoint, so a target the
+  # adapter refused to judge must never be printed as dead.
+  assert_contains "$out" \
+    "endpoint: unreadable - could not be read, not confirmed gone (backend=tmux window=fm-sess:multi:colon)" \
+    "an unjudgeable tmux target shape was not reported as unreadable"
+  assert_contains "$out" \
+    "endpoint: unreadable - could not be read, not confirmed gone (backend=tmux window=fm-sess:flaky-window)" \
+    "a non-authoritative tmux read failure was not reported as unreadable"
+  assert_not_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:multi:colon)" \
+    "the digest declared an unjudgeable target dead"
+  assert_not_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:flaky-window)" \
+    "the digest declared a target it could not read dead"
+
+  pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one, unreadable when it cannot be judged"
 }
 
 # A remote secondmate's endpoint lives on another machine: its parent metadata
