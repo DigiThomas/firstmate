@@ -42,7 +42,7 @@ case "${1:-}" in
     # came back is the target it asked for, because real tmux answers an
     # unknown target from the active window instead of failing. Echo the
     # requested identity for a window this fake hosts, and a decoy for the
-    # dead-* ones it refuses above.
+    # dead-* ones the plain pane read below already refuses.
     case "$*" in
       *session_name*)
         _t=; _p=
@@ -57,20 +57,6 @@ case "${1:-}" in
       *dead-*) exit 1 ;;
       *) printf '%%1\n' ;;
     esac
-    ;;
-  list-windows)
-    # The endpoint probe requires the exact recorded window in a session
-    # inventory before it trusts a pane read, because real tmux answers an
-    # absent named target from the active window. This fake therefore has to
-    # report an inventory rather than an empty one: it lists the windows this
-    # home's own task records declare, minus the dead-* ones display-message
-    # refuses above, so the two answers cannot contradict each other.
-    for _m in "${FM_HOME:-}"/state/*.meta; do
-      [ -f "$_m" ] || continue
-      _w=$(sed -n 's/^window=//p' "$_m" | head -1)
-      case "$_w" in ''|*dead-*) continue ;; esac
-      printf '%s\n' "${_w#*:}"
-    done
     ;;
   capture-pane)
     case "$*" in

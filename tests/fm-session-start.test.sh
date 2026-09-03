@@ -330,21 +330,23 @@ case "\${1:-}" in
     printf '\${sep}\${sep}\${sep}\${sep}\${sep}\n'
     exit 0
     ;;
-  list-windows)
-    target=""
-    prev=""
-    for a in "\$@"; do
-      [ "\$prev" = "-t" ] && target="\$a"
-      prev="\$a"
-    done
-    [ "\${target#=}" = "$live_session" ] && { printf '%s\n' "$live_window"; exit 0; }
-    exit 1
-    ;;
 esac
 exit 1
 SH
   chmod +x "$fakebin/tmux"
 }
+
+# make_fake_tmux_secondmate_recovery <fakebin>: a stateful tmux boundary
+# fixture for the real session-start -> bootstrap -> spawn path.
+# FM_FAKE_TMUX_MODE selects missing, ambiguous, unreadable, or shell, and a
+# window this fake has already spawned answers as present regardless of mode.
+# Every answering mode returns a full identity record rather than an error,
+# because real tmux resolves rather than refuses: `missing` answers with a
+# DIFFERENT window (tmux's active-window fallback), so the probe can only
+# catch it by comparing the identity it asked for against the one that came
+# back; `unreadable` fails the read outright; and the present, `ambiguous` and
+# `shell` answers all carry the requested identity and vary only the reported
+# process name.
 make_fake_tmux_secondmate_recovery() {
   local fakebin=$1
   cat > "$fakebin/tmux" <<'SH'

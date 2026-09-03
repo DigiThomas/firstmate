@@ -687,11 +687,7 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  # This fake answers pane reads for sess:win, so its window inventory has to
-  # contain that window: the endpoint probe checks membership first, because
-  # real tmux resolves an absent named target to the active window instead of
-  # failing.
-  list-windows) printf 'win\n'; exit 0 ;;
+  list-windows) exit 0 ;;
 esac
 exit 0
 SH

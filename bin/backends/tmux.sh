@@ -273,9 +273,11 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 #   1. The session component is anchored with tmux's `=` exact-match form,
 #      because tmux otherwise accepts a unique session-name PREFIX: with only
 #      `alphalong` present, `-t alpha:win` resolves against it, while
-#      `-t =alpha:win` does not resolve at all. `=` is only valid on a
-#      session component, so a bare `%pane` or `@window` id is passed through
-#      unanchored.
+#      `-t =alpha:win` does not resolve at all. This mirrors the anchored kill
+#      target `-t "=$session:=$window"` in fm_backend_tmux_kill above, the
+#      established local precedent for refusing a prefix match. `=` is only
+#      valid on a session component, so a bare `%pane` or `@window` id is
+#      passed through unanchored.
 #   2. Window INDEX beats window NAME, and this parser must not invert that.
 #      Verified with index 0 named `zero` and index 1 named `0`: tmux resolves
 #      `amb:0` to INDEX 0. Verifying the resolved identity rather than
