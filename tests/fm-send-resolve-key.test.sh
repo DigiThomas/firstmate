@@ -68,7 +68,20 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  # A pane read alone cannot prove a tmux target exists: real tmux answers an
+  # absent named target from the client's ACTIVE window, so the endpoint probe
+  # checks the session inventory first. An empty inventory would read as "every
+  # window is gone", so this fake reports the windows this home's own task
+  # records declare, plus any ad hoc name its test addresses directly.
+  list-windows)
+    for _m in "${FM_HOME:-}"/state/*.meta; do
+      [ -f "$_m" ] || continue
+      _w=$(sed -n 's/^window=//p' "$_m" | head -1)
+      [ -n "$_w" ] || continue
+      printf '%s\n' "${_w#*:}"
+    done
+    printf '%s\n' "${FM_FAKE_TMUX_WINDOWS:-win}"
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -516,8 +529,11 @@ test_flag_misuse_refuses() {
   [ "$rc" -ne 0 ] || fail "an empty answer message should refuse"
   assert_contains "$(cat "$err")" "nonempty answer message" "the empty-message refusal should be explicit"
 
-  # An explicit backend target has no task ledger in this home.
+  # An explicit backend target has no task ledger in this home. The fake tmux
+  # has to host that window, or the send would refuse for an absent endpoint
+  # before it ever reaches the ledger check this case is about.
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_FAKE_TMUX_WINDOWS=elsewhere \
     "$SEND" sess:elsewhere --resolve-key k "answer" >/dev/null 2>"$err"; rc=$?
   [ "$rc" -ne 0 ] || fail "an explicit backend target should refuse --resolve-key"
   assert_contains "$(cat "$err")" "no decision ledger" "the explicit-target refusal should be explicit"

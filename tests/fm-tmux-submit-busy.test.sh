@@ -56,7 +56,20 @@ case "${1:-}" in
       fi
     fi
     exit 0 ;;
-  list-windows) exit 0 ;;
+  # A pane read alone cannot prove a tmux target exists: real tmux answers an
+  # absent named target from the client's ACTIVE window, so the endpoint probe
+  # checks the session inventory first. An empty inventory would read as "every
+  # window is gone", so this fake reports the windows this home's own task
+  # records declare, plus any ad hoc name its test addresses directly.
+  list-windows)
+    for _m in "${FM_HOME:-}"/state/*.meta; do
+      [ -f "$_m" ] || continue
+      _w=$(sed -n 's/^window=//p' "$_m" | head -1)
+      [ -n "$_w" ] || continue
+      printf '%s\n' "${_w#*:}"
+    done
+    printf '%s\n' "${FM_FAKE_TMUX_WINDOWS:-win}"
+    exit 0 ;;
 esac
 exit 1
 SH

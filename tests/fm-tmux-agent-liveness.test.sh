@@ -255,6 +255,74 @@ fm_backend_tmux_foreground_comms "$SESSION:no-such-window" >/dev/null \
   || fail "an absent window in a readable session must classify missing, not whatever the fallback pane runs"
 pass "tmux liveness: an absent window classifies missing rather than inheriting tmux's active-window fallback"
 
+# The same fallback reached the CHEAP probe too. fm_backend_target_exists is a
+# boolean that could not return false: its tmux arm was a bare
+# `display-message -t <target>`, which the fallback answers from the active
+# window for ANY name, so the session-start fleet digest printed `endpoint:
+# alive` for a task whose window had been gone for days. The raw-primitive
+# assertion first is what keeps this case non-vacuous: it proves the trap is
+# still live in this tmux, so the probe's false is the containment working and
+# not tmux having changed under the test.
+tmux display-message -p -t "$SESSION:no-such-window" '#{pane_id}' >/dev/null 2>&1 \
+  || fail "the raw pane read no longer resolves an absent window, so this case would prove nothing about the probe"
+if fm_backend_target_exists tmux "$SESSION:no-such-window" "no-such-window"; then
+  fail "the cheap existence probe must reject an absent window instead of inheriting tmux's active-window fallback"
+fi
+pass "tmux liveness: the cheap existence probe rejects an absent window"
+
+fm_backend_target_exists tmux "$SESSION:idle" "idle" \
+  || fail "the cheap existence probe must still accept a window that really exists"
+pass "tmux liveness: the cheap existence probe still accepts a present window"
+
+if fm_backend_target_exists tmux "no-such-session-$$:idle" "idle"; then
+  fail "the cheap existence probe must reject a target in a session that does not exist"
+fi
+pass "tmux liveness: the cheap existence probe rejects an absent session"
+
+# The probe's boolean deliberately collapses `unreadable` onto false, but the
+# recovery-grade classifier it now shares an inventory owner with must keep the
+# distinction that stops a transient tmux problem from licensing a duplicate.
+[ "$(fm_backend_tmux_window_presence "$SESSION:idle")" = present ] \
+  || fail "a real window must read present"
+[ "$(fm_backend_tmux_window_presence "$SESSION:no-such-window")" = missing ] \
+  || fail "an absent window in a readable session must read missing"
+[ "$(fm_backend_tmux_window_presence "no-such-session-$$:idle")" = missing ] \
+  || fail "an authoritatively absent session must read missing"
+[ "$(fm_backend_tmux_window_presence "$SESSION:a:b")" = unreadable ] \
+  || fail "a malformed target must read unreadable, never missing"
+pass "tmux liveness: the shared window-presence read keeps missing and unreadable apart"
+
+# tmux's own id handles address no session inventory, so they are settled by
+# requiring the pane read to actually produce a pane id. Verified on tmux 3.6b:
+# an absent `%pane` or `@window` id also exits 0, printing an empty line, so
+# exit status alone could not reject them either. These are the shapes the
+# supervisor pane target takes, which comes from $TMUX_PANE rather than a name.
+idle_pane=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SESSION:idle" '#{pane_id}')
+idle_window=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SESSION:idle" '#{window_id}')
+[ -n "$idle_pane" ] && [ -n "$idle_window" ] \
+  || fail "could not read the idle window's own tmux ids"
+
+fm_backend_target_exists tmux "$idle_pane" \
+  || fail "the cheap existence probe must accept a live pane id"
+fm_backend_target_exists tmux "$idle_window" \
+  || fail "the cheap existence probe must accept a live window id"
+if fm_backend_target_exists tmux '%99999'; then
+  fail "the cheap existence probe must reject an absent pane id"
+fi
+if fm_backend_target_exists tmux '@99999'; then
+  fail "the cheap existence probe must reject an absent window id"
+fi
+pass "tmux liveness: the cheap existence probe accepts live tmux ids and rejects absent ones"
+
+# session:window.pane is a legal target whose window part is not an inventory
+# name, so the membership check must not reject a real pane addressed that way.
+fm_backend_target_exists tmux "$SESSION:idle.0" \
+  || fail "the cheap existence probe must accept a session:window.pane target for a real window"
+if fm_backend_target_exists tmux "$SESSION:no-such-window.0"; then
+  fail "a pane suffix must not let an absent window through the membership check"
+fi
+pass "tmux liveness: the cheap existence probe handles session:window.pane without weakening the membership check"
+
 # --- Cursor's composer: the terminal cursor is NOT a composer locator --------
 # Cursor Agent CLI parks its terminal cursor below its footer with cursor_flag 0,
 # so tmux's #{cursor_y} answers `unknown` for every Cursor pane state and the

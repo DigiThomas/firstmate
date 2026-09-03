@@ -38,6 +38,20 @@ SH
 #!/usr/bin/env bash
 case "${1:-}" in
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
+  list-windows)
+    # The endpoint probe requires the exact recorded window in a session
+    # inventory before it trusts a pane read, because real tmux answers an
+    # absent named target from the active window. This fake therefore has to
+    # report an inventory rather than an empty one: it lists the windows this
+    # home's own task records declare, minus the dead-* ones display-message
+    # refuses above, so the two answers cannot contradict each other.
+    for _m in "${FM_HOME:-}"/state/*.meta; do
+      [ -f "$_m" ] || continue
+      _w=$(sed -n 's/^window=//p' "$_m" | head -1)
+      case "$_w" in ''|*dead-*) continue ;; esac
+      printf '%s\n' "${_w#*:}"
+    done
+    ;;
   capture-pane)
     case "$*" in
       *fm-domain-alpha*) printf 'stale terminal summary: Phase 7 started\n> \n' ;;

@@ -309,6 +309,20 @@ case "\${1:-}" in
     [ "\$target" = "$live" ] && { printf '%%1\n'; exit 0; }
     exit 1
     ;;
+  list-windows)
+    # The endpoint probe verifies the exact window against a session inventory
+    # before it trusts a pane read, because real tmux answers an absent named
+    # target from the active window. This fake lists the one window it answers
+    # pane reads for, and nothing for any other session.
+    target=""
+    prev=""
+    for a in "\$@"; do
+      [ "\$prev" = "-t" ] && target="\$a"
+      prev="\$a"
+    done
+    [ "\$target" = "${live%%:*}" ] && { printf '%s\n' "${live#*:}"; exit 0; }
+    exit 1
+    ;;
 esac
 exit 1
 SH
