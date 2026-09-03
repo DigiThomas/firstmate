@@ -92,6 +92,25 @@ Before releasing its singleton lock after printing an actionable reason, the wat
 A matching PID and identity lets an attached arm report the delivered reason and exit zero even after its durable wake was handled and acknowledged, while an unrelated queue producer or a recycled PID cannot satisfy the match.
 Only a cycle with no matching delivery record emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
 
+Every non-zero cycle must be reportable from its failure line alone.
+`bin/fm-watch.sh` tracks the phase it is in and prints `watcher: FAILED - watcher cycle exited <rc> during <step>[ after SIG<name>]` on any non-zero exit, including a pre-lock refusal, a trapped signal, and a `set -u` abort.
+The arm captures the watcher's stderr, replays it on its own stderr, and quotes a bounded tail of it in the failure line; when the watcher could not print its own reason, the arm synthesizes one carrying the exit code, signal, lock and beacon state, queued-wake count, and that stderr tail.
+An arm torn down by HUP, INT, or TERM tears its watcher down too, so it replays the watcher's `watcher: FAILED` lines from the captured stdout, and its captured stderr, on its own stderr before deleting either file.
+That replay is filtered to `watcher: FAILED` because the arm's stdout is what the adapters and `bin/fm-claude-stop-autoarm.sh` classify, and an unfiltered replay would surface a wake reason line for a cycle that is being torn down on purpose.
+The other typed failures carry the same class of evidence: the attached-cycle failure names the target's liveness, the beacon age, the queued-wake count, and the last lifecycle row recorded for that watcher, and the unconfirmable-watcher failure names the lock pid, its liveness, whether it matches this home's watcher identity, and the beacon age.
+
+## Attach verification
+
+`watcher: attached pid=<N>` claims a live cycle, so it is not decided by a single read.
+A fresh beacon proves the watcher was alive recently, not that it is alive now: a beacon inside the grace has been observed with no watcher process left at all.
+Each attach candidate must keep verifying as this home's live watcher - process alive, lock identity unchanged, beacon fresh - for the whole `FM_ARM_ATTACH_VERIFY` window (2 seconds by default) before the attached line is printed, and the line reports the window it survived plus `beacon advanced` when the beacon moved inside it, which is the only positive proof of progress rather than of recent existence.
+A candidate that stops verifying inside that window is a failed attach, never a healthy one: the arm re-executes itself as `--restart` so supervision is genuinely restored, bounded by `FM_ARM_RESTART_MAX` (one restart per arm, tracked through `FM_ARM_RESTART_DEPTH`) so a watcher that dies on every launch reports the failure instead of looping.
+A lock that moves inside the window to a different pid which passes that same gate is not a failed attach: that successor is a verified healthy watcher, and `--restart` would TERM it, so the arm retargets onto the successor and verifies it from scratch, bounded by `FM_ARM_ATTACH_RETARGET_MAX` (two retargets per attach) so a flapping lock still ends in an honest failure instead of looping.
+Restart is reserved for a target that actually stopped verifying - a dead process, an identity mismatch, or a stale beacon.
+With the restart budget spent the arm reports `watcher: attach abandoned - <why> (no restart budget left)` and starts its own watcher rather than claiming the dead one.
+One owner in `bin/fm-watch-arm.sh` handles every failed attach, so the restart budget and the line it prints are identical at the entry attach, the in-loop attach, and the owned-child attach.
+Past the verification window the attached poll re-checks the same three facts every `FM_ARM_ATTACH_POLL`, so a later death is caught within one poll and never silently inherited.
+
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
@@ -107,6 +126,8 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 `tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, a persistent live successor after recovery, a watcher close inside the handling window that must leave the printed acknowledgement valid, and the self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
 `tests/fm-watch-recovery-loop.test.sh` covers the once-per-generation announcement bound with the real Pi extension against a refused handling handshake, and a handling successor that must surface a real crew event instead of going blind.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+It also holds a lock with a fresh beacon through a holder that dies only after the arm has demonstrably read it, proving the arm never reports that attach as healthy and instead restarts (or, with no restart budget, abandons the attach and starts its own watcher), hands the lock to a second genuinely healthy holder mid-window to prove the arm retargets onto that successor and leaves it alive, and it terminates a running watcher and refuses a pre-lock start to prove a non-zero exit names its step, its signal, and the stderr the cycle produced.
+It also TERMs an arm that owns a live watcher to prove the interrupted arm replays that watcher's own failure line from the captured stdout before deleting it, and that a non-`watcher: FAILED` line in the same capture is not replayed.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim; [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.

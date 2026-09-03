@@ -491,6 +491,30 @@ ok - unacknowledged recovery is announced at most once per generation and the su
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=59357
 ```
 
+Attach verification and non-zero exit reporting were verified on 2026-09-03 on macOS 26.6 (Darwin 25.6.0, build 25G72) with GNU bash 3.2.57 and ShellCheck 0.11.0, against `bin/fm-watch.sh` and `bin/fm-watch-arm.sh` rebased onto `main` at `3d2a08b`:
+
+```sh
+bin/fm-lint.sh
+bin/fm-test-run.sh tests/fm-watcher-lock.test.sh
+```
+
+Four cases in that suite carry these guarantees, each also run against the pre-change `bin/fm-watch.sh` and `bin/fm-watch-arm.sh` from `main` at `3d2a08b` to confirm it fails there:
+
+```text
+ok - arm refuses to attach to a dying watcher and restarts supervision instead
+ok - arm retargets onto a healthy lock successor instead of restarting over it
+ok - a non-zero watcher exit reports its step, signal, and stderr
+ok - an interrupted arm replays only the watcher's failure line from captured stdout
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=80214
+```
+
+Against the pre-change scripts, a lock holder that died moments after the arm's single healthy read was still announced as `watcher: attached pid=<N> (beacon 0s)`, a mid-window handover to a successor that had already passed the same liveness, identity, and beacon gate was classified as a failed attach and TERMed that healthy successor, an arm interrupted at a turn boundary deleted its watcher's captured stdout unread, and a watcher terminated mid-cycle produced only `watcher: FAILED - watcher cycle exited 1 without an actionable reason`.
+Against the current scripts the dying target is never announced and the arm restores supervision with a genuinely new watcher, the arm retargets onto the healthy successor and leaves it alive, the interrupted arm replays that failure line on its own stderr while a non-`watcher: FAILED` line seeded into the same capture is not replayed onto either stream, and a terminated cycle reports lines of the form `watcher: FAILED - watcher cycle exited 1 during terminal-wait after SIGTERM`.
+The retarget case additionally asserts that the retargeted line carries its verification window, because an arm that simply never restarts satisfies every other assertion in it and the case would otherwise stop discriminating.
+The lock-refusal case additionally shows the arm naming `watcher cycle exited 1 during lock-acquire` on stdout while replaying the watcher's own `heartbeat is stale` explanation on stderr.
+
+The phase names in that line come from `WATCH_STEP` assignments that cover every phase of the poll loop, including the phases added upstream since this change was first written (`secondmate-wake-stall`, `procevent-tick`, `downtime-resurface`, and `inactive-outcome-scan`), so a cycle that exits inside one of them is still reportable from its failure line alone.
+
 Deterministic entry points:
 
 ```sh
