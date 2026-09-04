@@ -371,17 +371,34 @@ EOF
       # or a `%id`; anything else leaves the target ambiguous, which is
       # `unreadable` rather than `missing` so it can never license a duplicate.
       #
-      # KNOWN LIMIT, and why it is bounded rather than open: a window whose own
-      # NAME contains a dot can be confirmed only while no window is named by
-      # its dot-prefix. Verified on tmux 3.6b: with `fm-task.a` alone the target
-      # resolves to itself and reads `present`; add a window named `fm-task` and
-      # the same target resolves to `fm-task`, so this reads `unreadable` and
-      # the dotted endpoint can never be confirmed alive - it is also invisible
-      # to stale detection, since that keys on a confirmed-gone endpoint. The
-      # limit is contained at the source: fm_backend_tmux_create_task above
-      # refuses to create a dotted window name at all, so no tmux task endpoint
-      # can enter this state. Do not "fix" this by preferring the prefix window,
-      # which would confirm liveness about a different worker's pane.
+      # KNOWN LIMIT, and it is NOT fully closed - state it exactly, because an
+      # earlier version of this comment overclaimed. A window whose own NAME
+      # contains a dot behaves differently depending on the tail:
+      #
+      #   NON-NUMERIC tail (`fm-task.a`): with a window named `fm-task` also
+      #   present, tmux resolves the target to `fm-task`, the pane check below
+      #   rejects it, and this reads `unreadable`. Safe: unreadable licenses no
+      #   recovery.
+      #
+      #   NUMERIC tail (`fm-task.0`): tmux again resolves to `fm-task`, but now
+      #   the tail is a legal pane index, so `wpart` matches that wrong window
+      #   and `ppart` matches ITS pane, and this returns `present` about a
+      #   DIFFERENT worker's pane. Verified on tmux 3.6b with the live agent in
+      #   `fm-task.0`: this reports `present`, fm_backend_tmux_agent_state
+      #   reports `dead` for the neighbour's idle shell, and bin/fm-bootstrap.sh
+      #   acts on `dead` by killing that endpoint and respawning. So a live
+      #   agent can read dead and an unrelated window can be destroyed.
+      #
+      # fm_backend_tmux_create_task above refuses to CREATE a dotted window
+      # name, which prevents new pairs, but it does not migrate or detect a
+      # pre-existing `fm-<id>` / `fm-<id>.<digits>` pair, and
+      # fm_task_id_path_safe permits such ids. The numeric case is therefore
+      # open, not contained; it is pre-existing rather than introduced here
+      # (the pre-change probe answered `true` for the same target), and closing
+      # it is a behavioural change tracked separately.
+      #
+      # Do not "fix" this by preferring the prefix window, which would confirm
+      # liveness about a different worker's pane on purpose.
       case "$rest" in
         *.*)
           wpart=${rest%.*}
