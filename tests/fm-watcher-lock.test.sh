@@ -1299,6 +1299,73 @@ test_arm_bounds_a_lock_that_never_finishes_settling() {
   pass "arm bounds a lock that never finishes settling instead of polling forever"
 }
 
+test_attached_arm_bounds_repeated_replacement_verification_failures() {
+  # An arm attached to a healthy watcher re-evaluates a replacement candidate
+  # that fails verification, on the ordinary cadence. Each attempt starts a fresh
+  # verification with a fresh retarget budget, so a lock held in a
+  # flapping-but-sampled-healthy state can keep the arm re-attempting forever and
+  # never reach a terminal result. That is the same quiet failure as a cycle that
+  # exits without saying why, which is what this change exists to remove.
+  # The flap is the realistic one: BOTH holders are live, identity-matched and
+  # beaconing, so every sample reads healthy and each attempt fails only by
+  # exhausting its retarget budget. Nothing here is racing a death.
+  local dir state fakebin armout armpid i status
+  dir=$(make_case attached-replacement-bound)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  local -x FM_PROC_ROOT_OVERRIDE="$dir/noproc"
+  install_identity_probe "$dir"
+  spawn_identity_twins "$state" || fail "could not spawn two lock holders sharing one identity"
+  seed_watcher_lock_for_pid "$state" "$dir" "$TWIN_A"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_ARM_ATTACH_VERIFY=1 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 \
+    FM_ARM_ATTACH_RETARGET_MAX=1 FM_ARM_ATTACH_REPLACEMENT_MAX=3 FM_ARM_RESTART_MAX=0 \
+    "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  # The arm must first ATTACH cleanly, so what follows exercises the in-loop
+  # replacement branch rather than the entry attach.
+  i=0
+  while [ "$i" -lt 200 ]; do
+    grep -qF "watcher: attached pid=$TWIN_A" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$TWIN_A" "$armout" \
+    || fail "arm never attached to the seeded holder, so the replacement branch was never reached: $(cat "$armout")"
+  # Now flap the lock between the two live twins faster than one verification
+  # window can complete. Every candidate is healthy when selected and healthy at
+  # every later sample, so each attempt ends by exhausting its retarget budget
+  # rather than by observing anything dead.
+  i=0
+  while [ "$i" -lt 600 ]; do
+    is_live_non_zombie "$armpid" || break
+    grep -qF 'consecutive replacement watchers failed verification' "$armout" 2>/dev/null && break
+    printf '%s\n' "$TWIN_B" > "$state/.watch.lock/pid.next"
+    mv -f "$state/.watch.lock/pid.next" "$state/.watch.lock/pid"
+    touch "$state/.last-watcher-beat"
+    sleep 0.1
+    printf '%s\n' "$TWIN_A" > "$state/.watch.lock/pid.next"
+    mv -f "$state/.watch.lock/pid.next" "$state/.watch.lock/pid"
+    touch "$state/.last-watcher-beat"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'consecutive replacement watchers failed verification' "$armout" \
+    || fail "attached arm never bounded its replacement retries: $(cat "$armout")"
+  is_live_non_zombie "$TWIN_A" || fail "attached arm killed a healthy twin while bounding its retries"
+  is_live_non_zombie "$TWIN_B" || fail "attached arm killed a healthy twin while bounding its retries"
+  wait_for_exit "$armpid" "$ARM_FAIL_EXIT_POLLS"
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] \
+    || fail "attached arm returned success after exhausting its replacement retries (status $status)"
+  kill "$armpid" "$TWIN_A" "$TWIN_B" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  wait "$TWIN_A" 2>/dev/null || true
+  wait "$TWIN_B" 2>/dev/null || true
+  pass "attached arm bounds repeated replacement verification failures into a terminal result"
+}
+
 # The pid of the watcher a cycle actually STARTED, read from the arm layer's own
 # lifecycle ledger. It answers "did a fresh watcher run" for a cycle that ended
 # too fast for the arm to print its started line.
@@ -1773,6 +1840,7 @@ test_arm_retargets_to_a_healthy_lock_successor
 test_arm_never_restarts_over_a_healthy_lock_holder
 test_arm_waits_out_a_settling_lock_successor
 test_arm_bounds_a_lock_that_never_finishes_settling
+test_attached_arm_bounds_repeated_replacement_verification_failures
 test_nonzero_watcher_exit_reports_an_actionable_reason
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified

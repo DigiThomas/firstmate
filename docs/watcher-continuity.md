@@ -118,6 +118,8 @@ The window, `FM_ARM_ATTACH_RETARGET_MAX`, and `FM_ARM_RESTART_MAX` still bound i
 With the restart budget spent the arm reports `watcher: attach abandoned - <why> (no restart budget left)` and starts its own watcher rather than claiming the dead one.
 One owner in `bin/fm-watch-arm.sh` handles every failed attach, so the restart budget and the line it prints are identical at the entry attach, the in-loop attach, and the owned-child attach.
 Past the verification window the attached poll re-checks the same three facts every `FM_ARM_ATTACH_POLL`, so a later death is caught within one poll and never silently inherited.
+A replacement candidate that fails verification is re-evaluated on that same cadence rather than announced, and that re-evaluation is bounded by `FM_ARM_ATTACH_REPLACEMENT_MAX` consecutive failures, reset by any candidate that does verify.
+Each attempt starts a fresh verification with a fresh retarget budget, so a lock held in a flapping-but-sampled-healthy state could otherwise keep an arm re-attempting forever and never reach a terminal result, which is the same quiet failure as a cycle that exits without saying why.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.

@@ -127,6 +127,11 @@ ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 ATTACH_VERIFY=${FM_ARM_ATTACH_VERIFY:-2}
 ATTACH_RETARGET_MAX=${FM_ARM_ATTACH_RETARGET_MAX:-2}
 ARM_RESTART_MAX=${FM_ARM_RESTART_MAX:-1}
+# How many CONSECUTIVE replacement candidates may fail verification while this
+# arm is still following a healthy watcher, before the arm stops re-evaluating
+# and returns a terminal result. Counted consecutively and reset by any candidate
+# that does verify, so ordinary handovers never accumulate toward it.
+ATTACH_REPLACEMENT_MAX=${FM_ARM_ATTACH_REPLACEMENT_MAX:-20}
 ARM_RESTART_DEPTH=${FM_ARM_RESTART_DEPTH:-0}
 STDERR_TAIL_LINES=${FM_ARM_STDERR_TAIL_LINES:-5}
 # A zero window would collapse the gate to the single healthy read this script
@@ -137,6 +142,9 @@ case "$ATTACH_VERIFY" in *[!0-9]*|''|0) ATTACH_VERIFY=2 ;; esac
 # is a correctness property, not a tunable-off feature.
 case "$ATTACH_RETARGET_MAX" in *[!0-9]*|''|0) ATTACH_RETARGET_MAX=2 ;; esac
 case "$ARM_RESTART_MAX" in *[!0-9]*|'') ARM_RESTART_MAX=1 ;; esac
+# A zero bound would make the first flap terminal, which is the opposite failure:
+# an arm that abandons a healthy watcher over one unlucky sample.
+case "$ATTACH_REPLACEMENT_MAX" in *[!0-9]*|''|0) ATTACH_REPLACEMENT_MAX=20 ;; esac
 case "$ARM_RESTART_DEPTH" in *[!0-9]*|'') ARM_RESTART_DEPTH=0 ;; esac
 case "$STDERR_TAIL_LINES" in *[!0-9]*|''|0) STDERR_TAIL_LINES=5 ;; esac
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
@@ -599,7 +607,7 @@ handle_failed_attach() {  # <abandon|fail> [exit-code] [signal]
 # it is reported, so a successor that is itself in the act of dying is never
 # announced as healthy.
 attach_and_wait() {
-  local attached_pid=$1 candidate
+  local attached_pid=$1 candidate replacement_failures=0
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ] || [ "$HEALTHY_IDENTITY" != "$cycle_watcher_identity" ]; then
@@ -607,10 +615,22 @@ attach_and_wait() {
         if ! attach_verified "$candidate"; then
           # Do not announce a replacement that did not survive verification;
           # re-evaluate on the ordinary cadence rather than spinning on a
-          # flapping lock.
+          # flapping lock. That re-evaluation is BOUNDED: each attempt starts a
+          # fresh verification with a fresh retarget budget, so a lock held in a
+          # flapping-but-sampled-healthy state could otherwise keep this arm
+          # re-attempting forever and never reach a terminal result. An arm that
+          # never terminates is the same quiet failure as a cycle that exits
+          # without saying why, which is what this whole change exists to remove.
+          replacement_failures=$((replacement_failures + 1))
+          if [ "$replacement_failures" -ge "$ATTACH_REPLACEMENT_MAX" ]; then
+            cycle_log_append unknown unknown replacement-verification-exhausted none
+            echo "watcher: FAILED - ${ATTACH_REPLACEMENT_MAX} consecutive replacement watchers failed verification while attached to pid=$attached_pid, so this arm stopped re-attempting (last: $ATTACH_VERIFY_REASON; $(no_fresh_watcher_detail), queued wakes: $(queued_wake_count))"
+            return 1
+          fi
           sleep "$ATTACH_POLL"
           continue
         fi
+        replacement_failures=0
         candidate=$ATTACH_VERIFIED_PID
         cycle_log_append unknown unknown lock-replaced "attached:$candidate"
         attached_pid=$candidate
