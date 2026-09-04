@@ -522,6 +522,16 @@ ok - arm waits out a settling lock successor instead of restarting over it
 Against that earlier arm the case fails with `not ok - arm treated a settling lock successor as a failed attach: watcher: restarting after a failed attach - attach target pid=<N> stopped verifying as this home's live watcher within 6s (pid alive, beacon 0s)`, which is the harm itself: the lock pid was alive and the arm restarted over it anyway, and `--restart` opens by sending TERM to exactly that pid.
 The retarget case cannot reach this state, because it hands the lock between two holders that already share one published identity, so its successor is healthy on the first sample and the publication gap never exists.
 
+Two further cases were added on 2026-09-04 after an independent adversarial review reproduced a healthy-watcher kill on this same branch, verified on the same host and each first run against the branch as it stood before this fix:
+
+```text
+ok - arm abandons an exhausted retarget instead of restarting over the healthy holder
+ok - arm bounds a lock that never finishes settling instead of polling forever
+```
+
+The review's own reproduction, three lock handovers inside one verification window against live identity-matched holders, moved from `FINAL-HOLDER-SIGNALLED` three times out of three before the fix to `FINAL-HOLDER-ALIVE` three times out of three after it, with every holder surviving.
+Mutation testing pins these cases to behavior rather than to output text: an `attach_verified` that returns immediately, a retarget budget that never exhausts, a settling deadline that never fires, and a watcher that never publishes its terminal delivery record are each failed by the case that covers them.
+
 The phase names in that line come from `WATCH_STEP` assignments that cover every phase of the poll loop, including the phases added upstream since this change was first written (`secondmate-wake-stall`, `procevent-tick`, `downtime-resurface`, and `inactive-outcome-scan`), so a cycle that exits inside one of them is still reportable from its failure line alone.
 
 Deterministic entry points:

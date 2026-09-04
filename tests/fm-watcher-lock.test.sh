@@ -1023,6 +1023,13 @@ test_arm_retargets_to_a_healthy_lock_successor() {
   # simply never restarts, and stops discriminating at all.
   grep -qE "watcher: attached pid=$TWIN_B \(beacon [0-9]+s, verified [0-9]+s" "$armout" \
     || fail "arm reported the retargeted attach without verifying it: $(cat "$armout")"
+  # Behavioural, not textual. `verified Ns` is a constant in report_attached, so
+  # grepping it proves nothing on its own. An arm that really verifies is still
+  # inside the window when the lock moves, so it retargets and announces TWIN_B
+  # only. An arm that returns from verification immediately announces the holder
+  # it entered on, TWIN_A, before ever seeing the move.
+  ! grep -qF "watcher: attached pid=$TWIN_A" "$armout" \
+    || fail "arm announced an attach to the pre-move holder, so it did not verify inside the window: $(cat "$armout")"
   is_live_non_zombie "$TWIN_B" || fail "arm killed the verified healthy successor it should have attached to"
   ! grep -qF 'watcher: restarting after a failed attach' "$armout" \
     || fail "arm restarted over a verified healthy successor: $(cat "$armout")"
@@ -1113,6 +1120,107 @@ test_arm_waits_out_a_settling_lock_successor() {
   wait "$holder" 2>/dev/null || true
   wait "$successor" 2>/dev/null || true
   pass "arm waits out a settling lock successor instead of restarting over it"
+}
+
+test_arm_never_restarts_over_a_healthy_lock_holder() {
+  # F1. The retarget budget is a bound on how long verification will chase a
+  # moving lock. It is NOT a licence to kill whoever holds the lock when it runs
+  # out. On the budget+1-th move the arm used to return a failed attach while the
+  # lock named a pid that had just passed healthy_watcher, and a failed attach's
+  # only recovery is --restart, whose first act is TERM on that exact pid. The
+  # arm must abandon the attach instead, and every holder must survive.
+  local dir state fakebin armout armpid i n moved
+  dir=$(make_case arm-retarget-exhausted)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  local -x FM_PROC_ROOT_OVERRIDE="$dir/noproc"
+  install_identity_probe "$dir"
+  spawn_identity_twins "$state" || fail "could not spawn two lock holders sharing one identity"
+  seed_watcher_lock_for_pid "$state" "$dir" "$TWIN_A"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_ARM_ATTACH_VERIFY=2 FM_ARM_CONFIRM_TIMEOUT=5 FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_ATTACH_RETARGET_MAX=1 FM_ARM_RESTART_MAX=1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_identity_probe "$dir" "$TWIN_A" || fail "arm never read the seeded lock holder"
+  # One move more than the budget allows, alternating between two live holders
+  # that both pass the health gate, so exhaustion is reached with the lock naming
+  # a genuinely healthy pid rather than a dying one.
+  moved=0
+  for n in "$TWIN_B" "$TWIN_A" "$TWIN_B"; do
+    printf '%s\n' "$n" > "$state/.watch.lock/pid.next"
+    mv -f "$state/.watch.lock/pid.next" "$state/.watch.lock/pid"
+    moved=$((moved + 1))
+    sleep 0.3
+  done
+  [ "$moved" -eq 3 ] || fail "fixture did not move the lock past the retarget budget"
+  i=0
+  while [ "$i" -lt 200 ]; do
+    grep -qE 'watcher: (attach abandoned|restarting after a failed attach)' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! grep -qF 'watcher: restarting after a failed attach' "$armout" \
+    || fail "arm restarted over a lock a healthy watcher was holding: $(cat "$armout")"
+  grep -qF 'watcher: attach abandoned' "$armout" \
+    || fail "arm did not abandon the attach after exhausting its retarget budget: $(cat "$armout")"
+  grep -qF 'a healthy watcher holds the lock' "$armout" \
+    || fail "arm did not name the healthy holder as the reason it declined to restart: $(cat "$armout")"
+  is_live_non_zombie "$TWIN_A" || fail "arm killed a healthy lock holder after exhausting its retarget budget"
+  is_live_non_zombie "$TWIN_B" || fail "arm killed the healthy holder that owned the lock at exhaustion"
+  kill "$armpid" "$TWIN_A" "$TWIN_B" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  wait "$TWIN_A" 2>/dev/null || true
+  wait "$TWIN_B" 2>/dev/null || true
+  pass "arm abandons an exhausted retarget instead of restarting over the healthy holder"
+}
+
+test_arm_bounds_a_lock_that_never_finishes_settling() {
+  # The settling classification keeps the window polling while a live claimant has
+  # not published its identity yet. That tolerance must still be BOUNDED: a lock
+  # that never finishes publishing has to end in the honest never-published
+  # failure rather than holding the window open forever. The existing settling
+  # case holds its unpublished state for about two seconds inside a seven second
+  # window and so never reaches this deadline at all.
+  local dir state fakebin armout holder successor armpid i
+  dir=$(make_case arm-settling-deadline)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  local -x FM_PROC_ROOT_OVERRIDE="$dir/noproc"
+  install_identity_probe "$dir"
+  sleep 300 &
+  holder=$!
+  sleep 301 &
+  successor=$!
+  seed_watcher_lock_for_pid "$state" "$dir" "$holder"
+  # A short window, so the deadline is reached well inside the case's own budget.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_ARM_ATTACH_VERIFY=2 FM_ARM_CONFIRM_TIMEOUT=5 FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_RESTART_MAX=0 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  wait_for_identity_probe_count "$dir" "$holder" 2 \
+    || fail "arm never entered its verification window on the seeded lock holder"
+  # Move onto a live successor and never publish its identity, so the lock stays
+  # settling for the whole remaining window and past its deadline.
+  rm -f "$state/.watch.lock/pid-identity"
+  printf '%s\n' "$successor" > "$state/.watch.lock/pid.next"
+  mv -f "$state/.watch.lock/pid.next" "$state/.watch.lock/pid"
+  i=0
+  while [ "$i" -lt 300 ]; do
+    grep -qF 'never finished publishing' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'never finished publishing' "$armout" \
+    || fail "arm never bounded a lock that stayed unpublished past its settling deadline: $(cat "$armout")"
+  is_live_non_zombie "$successor" \
+    || fail "arm killed the unpublished lock holder instead of reporting the bound"
+  kill "$armpid" "$holder" "$successor" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  wait "$successor" 2>/dev/null || true
+  pass "arm bounds a lock that never finishes settling instead of polling forever"
 }
 
 # The pid of the watcher a cycle actually STARTED, read from the arm layer's own
@@ -1213,6 +1321,22 @@ test_arm_refuses_to_attach_to_a_dying_watcher() {
     done
     [ -n "$settled" ] \
       || fail "arm ($row) fresh watcher neither confirmably held the lock nor delivered a wake (lock '$lock_pid'): $(cat "$armout")"
+    # Lock ownership must be proven on BOTH endings, or the weaker one silently
+    # retires the assertion. The live ending checks the lock directly above. The
+    # delivered ending checks the watcher's own terminal delivery record, which
+    # the cycle publishes under its pid while it still holds the lock and before
+    # it releases it - so a matching pid is proof the FRESH watcher owned the
+    # lock and ran a full cycle, not merely that the arm printed a wake line.
+    if [ "$settled" = delivered ]; then
+      i=0
+      while [ "$i" -lt 200 ]; do
+        cut -f1 "$state/.watch-deliveries.log" 2>/dev/null | grep -qxF "$started_pid" && break
+        sleep 0.1
+        i=$((i + 1))
+      done
+      cut -f1 "$state/.watch-deliveries.log" 2>/dev/null | grep -qxF "$started_pid" \
+        || fail "arm ($row) published a wake with no delivery record proving pid=$started_pid held the lock: $(cat "$state/.watch-deliveries.log" 2>/dev/null)"
+    fi
     kill "$armpid" "$started_pid" 2>/dev/null || true
     wait "$armpid" 2>/dev/null || true
   done
@@ -1569,7 +1693,9 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_arm_refuses_to_attach_to_a_dying_watcher
 test_arm_retargets_to_a_healthy_lock_successor
+test_arm_never_restarts_over_a_healthy_lock_holder
 test_arm_waits_out_a_settling_lock_successor
+test_arm_bounds_a_lock_that_never_finishes_settling
 test_nonzero_watcher_exit_reports_an_actionable_reason
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified

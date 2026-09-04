@@ -351,11 +351,19 @@ attach_lock_settling() {
 ATTACH_VERIFY_REASON=
 ATTACH_VERIFY_BEACON_ADVANCED=0
 ATTACH_VERIFIED_PID=
+# Set when verification ended while the lock still named a pid that had just
+# passed healthy_watcher. The only recovery a failed attach has is --restart,
+# whose first act is TERM on the current lock pid, so restarting on this outcome
+# would kill a watcher this arm had just certified as healthy. That is the harm
+# the retarget branch exists to prevent, reached through budget expiry instead of
+# through a missing retarget.
+ATTACH_VERIFY_HEALTHY_HOLDER=0
 attach_verified() {  # <pid>
   local pid=$1 deadline before now retargets=0
   ATTACH_VERIFY_REASON=
   ATTACH_VERIFY_BEACON_ADVANCED=0
   ATTACH_VERIFIED_PID=$pid
+  ATTACH_VERIFY_HEALTHY_HOLDER=0
   before=$(fm_path_mtime "$BEAT" 2>/dev/null || true)
   # date(1) exposes whole seconds. Add one rounding second so the window cannot
   # collapse to a fraction of the configured budget when it opens just before the
@@ -387,7 +395,12 @@ attach_verified() {  # <pid>
       # Retarget onto it and verify it from scratch, bounded so a lock that keeps
       # flapping still resolves to an honest failure instead of looping.
       if [ "$retargets" -ge "$ATTACH_RETARGET_MAX" ]; then
-        ATTACH_VERIFY_REASON="the watcher lock kept moving during verification (pid=$pid to pid=$HEALTHY_PID after ${ATTACH_RETARGET_MAX} retargets, ${ATTACH_VERIFY}s each)"
+        # Budget spent, but $HEALTHY_PID passed healthy_watcher on the sample that
+        # ended this window. Record that, so the failed attach cannot route into
+        # --restart and TERM it. A flapping lock is still an honest failure; it is
+        # just never a reason to kill the watcher currently holding it.
+        ATTACH_VERIFY_REASON="the watcher lock kept moving during verification (pid=$pid to pid=$HEALTHY_PID after ${ATTACH_RETARGET_MAX} retargets, ${ATTACH_VERIFY}s each), and pid=$HEALTHY_PID holds it and is healthy"
+        ATTACH_VERIFY_HEALTHY_HOLDER=1
         HEALTHY_PID=$pid
         return 1
       fi
@@ -544,6 +557,10 @@ close_unobserved_cycle() {
 # instead of looping. Returns non-zero when the budget is spent, leaving the
 # caller to report honestly.
 restart_after_failed_attach() {
+  # Never restart over a lock that a healthy watcher currently holds. --restart
+  # opens by TERMing that exact pid, so this is the difference between "recover
+  # supervision" and "kill the supervision that is already running".
+  [ "$ATTACH_VERIFY_HEALTHY_HOLDER" -eq 0 ] || return 1
   [ "$ARM_RESTART_DEPTH" -lt "$ARM_RESTART_MAX" ] || return 1
   echo "watcher: restarting after a failed attach - $ATTACH_VERIFY_REASON"
   trap - HUP TERM INT
@@ -557,14 +574,21 @@ restart_after_failed_attach() {
 # budget spent the disposition decides what this arm says. "abandon" leaves the
 # caller to start its own watcher, "fail" is the typed nonzero cycle failure.
 handle_failed_attach() {  # <abandon|fail> [exit-code] [signal]
-  local disposition=$1 exit_code=${2:-unknown} signal=${3:-unknown}
+  local disposition=$1 exit_code=${2:-unknown} signal=${3:-unknown} why
   cycle_log_append "$exit_code" "$signal" attach-verification-failed none
   restart_after_failed_attach || true
+  # Say which of the two reasons stopped the restart, so an operator can tell a
+  # spent budget from a deliberate refusal to signal a healthy holder.
+  if [ "$ATTACH_VERIFY_HEALTHY_HOLDER" -eq 1 ]; then
+    why="a healthy watcher holds the lock"
+  else
+    why="no restart budget left"
+  fi
   if [ "$disposition" = abandon ]; then
-    echo "watcher: attach abandoned - $ATTACH_VERIFY_REASON (no restart budget left)"
+    echo "watcher: attach abandoned - $ATTACH_VERIFY_REASON ($why)"
     return 0
   fi
-  echo "watcher: FAILED - cycle ended without an actionable reason ($ATTACH_VERIFY_REASON; no restart budget left)"
+  echo "watcher: FAILED - cycle ended without an actionable reason ($ATTACH_VERIFY_REASON; $why)"
   return 1
 }
 
@@ -746,6 +770,13 @@ if [ "$mode" = handling-delivered ]; then
   exit $?
 fi
 
+# A pid this arm TERMed during --restart that had not exited by the time the wait
+# ran out. The watcher runs its TERM trap only when its current foreground sleep
+# returns, and that sleep is bounded by FM_POLL (15s by default), which is longer
+# than any wait here can be without blowing the adapters' arm-readiness budgets.
+# So the arm must never treat such a pid as an attach candidate: it is not merely
+# unverified, it is a process this arm has already told to die.
+RESTART_TERMED_PID=
 if [ "$mode" = restart ]; then
   # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
@@ -760,6 +791,14 @@ if [ "$mode" = restart ]; then
         sleep 0.1
         i=$((i + 1))
       done
+      # Only a SELF-triggered restart records this. An operator or guard passing
+      # --restart deliberately is entitled to the established behaviour of
+      # attaching to a healthy holder that outlived the TERM; the danger is
+      # specific to the arm restarting itself after a failed attach, where the
+      # pid it is about to re-verify is one it has just told to die.
+      if [ "$ARM_RESTART_DEPTH" -gt 0 ] && fm_pid_alive "$lock_pid"; then
+        RESTART_TERMED_PID=$lock_pid
+      fi
     else
       if ! clear_stale_recorded_watcher_lock; then
         echo "watcher: FAILED - stale watcher recovery state could not be persisted" >&2
@@ -773,6 +812,17 @@ fi
 # one - attach to that cycle and wait until it ends so the harness notify fires
 # then, not as an immediate empty wake. (--restart skips this: it just stopped
 # this home's watcher and wants a fresh one.)
+# A --restart that TERMed a live holder which has not exited yet must not fall
+# through into re-verifying and attaching to that same pid. attach_verified
+# cannot see the danger: the deferred-trap window is bounded by FM_POLL and is
+# strictly longer than the verification window, so the pid passes every sample
+# and the arm announces a verified attach to a process it has itself doomed.
+if [ -n "$RESTART_TERMED_PID" ]; then
+  cycle_log_append 1 none restart-target-still-exiting none
+  echo "watcher: FAILED - the watcher this restart stopped (pid=$RESTART_TERMED_PID) had not exited yet, so no attach was claimed ($(no_fresh_watcher_detail), queued wakes: $(queued_wake_count))"
+  exit 1
+fi
+
 if [ "$mode" = arm ] && healthy_watcher; then
   attach_candidate=$HEALTHY_PID
   # Captured before attach_verified re-reads the lock, so the abandoned-attach
