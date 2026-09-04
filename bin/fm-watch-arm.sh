@@ -790,6 +790,37 @@ if [ "$mode" = handling-delivered ]; then
   exit $?
 fi
 
+# Sub-second beacon stamp, used only to decide whether the beacon ADVANCED
+# between the moment this arm judged a holder and the moment it stops it.
+# fm_path_mtime is whole seconds, which is too coarse for that comparison: a
+# refresh inside the same second would be invisible. Falls back to whole seconds
+# where the finer format is unavailable, which weakens the comparison without
+# breaking it.
+beacon_stamp() {
+  local v
+  if [ "${_FM_UNAME:-}" = Darwin ]; then
+    v=$(stat -f %Fm "$BEAT" 2>/dev/null)
+  else
+    v=$(stat -c %.9Y "$BEAT" 2>/dev/null)
+  fi
+  [ -n "$v" ] || v=$(fm_path_mtime "$BEAT" 2>/dev/null)
+  printf '%s' "${v:-none}"
+}
+
+# The stop precondition, re-evaluated at the instant of stopping rather than
+# sampled once and trusted. No check placed BEFORE a stop can close a
+# check-to-stop window, so this does not pretend to: it converts "stopped a
+# watcher that had come back" into "declined because it came back". The holder
+# must still be the pid this arm judged, and its beacon must not have advanced
+# since that judgement.
+stop_precondition_holds() {  # <judged-pid> <judged-beacon-stamp>
+  local pid=$1 beat=$2 now_pid now_beat
+  now_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  [ "$now_pid" = "$pid" ] || return 1
+  now_beat=$(beacon_stamp)
+  [ "$now_beat" = "$beat" ] || return 1
+}
+
 # A pid this arm TERMed during --restart that had not exited by the time the wait
 # ran out. The watcher runs its TERM trap only when its current foreground sleep
 # returns, and that sleep is bounded by FM_POLL (15s by default), which is longer
@@ -819,12 +850,22 @@ if [ "$mode" = restart ]; then
       # the liveness beacon to be fresh within FM_GUARD_GRACE, and only the
       # watcher process touches that beacon, on every poll. A wedged watcher stops
       # beating and stops satisfying the predicate, so it remains replaceable.
+      # Captured BEFORE the judgement, so the comparison below is against the
+      # beacon this arm actually judged rather than against itself.
+      beat_at_decision=$(beacon_stamp)
       if healthy_watcher && [ "$HEALTHY_PID" = "$lock_pid" ]; then
         # Non-terminal, and deliberately not matching the adapters' readiness
         # pattern `^watcher: (started|attached)`: the terminal line is the
         # attached one this arm goes on to print for that same healthy watcher.
         echo "watcher: restart declined - pid=$lock_pid holds the lock and is healthy right now, so it was not signalled"
         cycle_log_append unknown unknown restart-declined-healthy-holder none
+        RESTART_DECLINED_HEALTHY=1
+      elif ! stop_precondition_holds "$lock_pid" "$beat_at_decision"; then
+        # The holder changed, or started beating again, between the judgement
+        # above and this point. Acting now would stop a watcher this arm has no
+        # current evidence against, which is the whole defect class.
+        echo "watcher: restart declined - the lock holder changed or resumed beating between the health check and the stop, so pid=$lock_pid was not signalled"
+        cycle_log_append unknown unknown restart-declined-precondition-moved none
         RESTART_DECLINED_HEALTHY=1
       else
       kill -TERM "$lock_pid" 2>/dev/null || true

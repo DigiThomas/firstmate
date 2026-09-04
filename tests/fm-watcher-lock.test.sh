@@ -689,6 +689,82 @@ test_restart_still_replaces_a_wedged_watcher() {
   pass "restart still replaces a wedged watcher whose beacon has gone stale"
 }
 
+test_restart_declines_when_the_holder_resumes_beating_before_the_stop() {
+  # The check-to-stop window. No check placed BEFORE a stop can close it, so this
+  # does not test that it is gone: it tests that the outcome changed from
+  # "stopped a watcher that had come back" to "declined because it came back".
+  # The holder is judged unhealthy on a stale beacon, then resumes beating before
+  # the stop is issued. The stop precondition is re-evaluated at that instant and
+  # must abort.
+  # The window is opened deterministically rather than raced: the arm's own
+  # identity probe is made to block until the fixture has refreshed the beacon, so
+  # the refresh is ordered strictly between the judgement and the stop.
+  local dir state fakebin out holder identity armpid gate i
+  dir=$(make_case restart-holder-resumes-beating)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/restart.out"
+  gate="$dir/probe.gate"
+  local -x FM_PROC_ROOT_OVERRIDE="$dir/noproc"
+  mkdir -p "$state" "$fakebin" "$dir/noproc"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
+  sleep 300 &
+  holder=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$holder") \
+    || fail "could not identify the holder"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  # Stale at judgement time, so the arm decides this holder is replaceable.
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  # The window has to open BETWEEN the health judgement and the stop. Refreshing
+  # any earlier lands inside fm_watcher_healthy, which then simply reports the
+  # holder healthy and the earlier check declines - the precondition would never
+  # run and this case would pass with or without it.
+  # The lock's pid file is read three times on this path: once by the arm, once
+  # inside the health judgement, and once by the stop precondition. Firing on the
+  # third places the refresh exactly in the window under test.
+  cat > "$fakebin/cat" <<SH
+#!/usr/bin/env bash
+if [ "\$1" = "$state/.watch.lock/pid" ]; then
+  n=0
+  [ -f "$dir/cat.count" ] && n=\$(cat "$dir/cat.count" 2>/dev/null)
+  n=\$((n + 1))
+  printf '%s' "\$n" > "$dir/cat.count"
+  if [ "\$n" -eq 3 ]; then
+    : > "$gate"
+    touch "$state/.last-watcher-beat"
+  fi
+fi
+exec $(command -v cat) "\$@"
+SH
+  chmod +x "$fakebin/cat"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=2 \
+    FM_ARM_ATTACH_VERIFY=1 FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_RESTART_DEPTH=1 "$WATCH_ARM" --restart > "$out" 2>/dev/null &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 300 ]; do
+    grep -qE 'watcher: (attached|FAILED)' "$out" 2>/dev/null && break
+    is_live_non_zombie "$armpid" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$gate" ] || fail "fixture never opened the check-to-stop window: $(cat "$out")"
+  is_live_non_zombie "$holder" \
+    || fail "restart stopped a holder that resumed beating between the check and the stop: $(cat "$out")"
+  grep -qF 'restart declined' "$out" \
+    || fail "restart did not decline after its stop precondition moved: $(cat "$out")"
+  kill "$armpid" "$holder" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "restart declines when its holder resumes beating between the check and the stop"
+}
+
 test_watcher_self_evicts_on_lock_takeover() {
   local dir state fakebin out pid i lock_pid
   dir=$(make_case self-evict)
@@ -1945,6 +2021,7 @@ test_watch_restart_attaches_to_healthy_peer
 test_self_triggered_restart_refuses_to_attach_to_the_pid_it_termed
 test_restart_never_signals_a_holder_that_is_healthy_at_signal_time
 test_restart_still_replaces_a_wedged_watcher
+test_restart_declines_when_the_holder_resumes_beating_before_the_stop
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
