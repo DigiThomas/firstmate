@@ -495,6 +495,82 @@ test_watch_restart_attaches_to_healthy_peer() {
   pass "watch restart attaches to a verified healthy peer and later surfaces a successor gap"
 }
 
+test_self_triggered_restart_refuses_to_attach_to_the_pid_it_termed() {
+  # F2. A watcher runs its TERM handler only when its current foreground wait
+  # returns, and that wait is bounded by FM_POLL rather than by anything the arm
+  # controls, so a TERMed watcher can stay alive far longer than the restart's
+  # bounded exit wait. A self-triggered restart that falls through then re-verifies
+  # and announces a VERIFIED attach to a process it has itself told to die - the
+  # branch's own defect, recreated by its own recovery path.
+  # The peer here is TERM-resistant, which is the deterministic stand-in for that
+  # deferral: both leave the arm looking at a live, healthy, identity-matched lock
+  # holder that it has already signalled.
+  # Only the SELF-triggered restart is guarded, so this case differs from
+  # test_watch_restart_attaches_to_healthy_peer in exactly one variable,
+  # FM_ARM_RESTART_DEPTH, and asserts the opposite outcome. An operator restart
+  # must still attach; a restart the arm chose for itself must not.
+  local dir state fakebin out peer_ready peer identity armpid status i
+  dir=$(make_case restart-self-triggered-termed)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/restart.out"
+  peer_ready="$dir/peer.ready"
+  node -e 'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$peer_ready" &
+  peer=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$peer_ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -s "$peer_ready" ]; then
+    kill -KILL "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    fail "TERM-resistant peer did not become ready"
+  fi
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") \
+    || fail "could not identify peer pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  # A fresh beacon, so the holder passes the health gate on every sample. What
+  # must stop the attach is the guard, not a stale beacon.
+  touch "$state/.last-watcher-beat"
+  # Backgrounded deliberately. An arm WITHOUT the guard does not exit here: it
+  # falls through and blocks in its attached poll, so a foreground run would hang
+  # to the harness timeout and report a fixture failure instead of the forbidden
+  # attach line this case exists to catch. Waiting for either outcome makes the
+  # regression assert the behaviour rather than the hang.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 \
+    FM_ARM_RESTART_DEPTH=1 "$WATCH_ARM" --restart > "$out" 2>/dev/null &
+  armpid=$!
+  i=0
+  while [ "$i" -lt "$ARM_FAIL_EXIT_POLLS" ]; do
+    grep -qE 'watcher: (attached|FAILED)' "$out" 2>/dev/null && break
+    is_live_non_zombie "$armpid" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$peer" || fail "fixture peer did not survive the restart's TERM"
+  ! grep -qF 'watcher: attached' "$out" \
+    || fail "self-triggered restart attached to the pid it had just TERMed: $(cat "$out")"
+  grep -qF "no attach was claimed" "$out" \
+    || fail "self-triggered restart did not report the unfinished stop: $(cat "$out")"
+  grep -qF "pid=$peer" "$out" \
+    || fail "self-triggered restart failure did not name the pid it stopped: $(cat "$out")"
+  wait_for_exit "$armpid" "$ARM_FAIL_EXIT_POLLS"
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] \
+    || fail "self-triggered restart exited zero after failing to stop its watcher: $(cat "$out")"
+  kill "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  kill -KILL "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  pass "a self-triggered restart refuses to attach to the watcher it just terminated"
+}
+
 test_watcher_self_evicts_on_lock_takeover() {
   local dir state fakebin out pid i lock_pid
   dir=$(make_case self-evict)
@@ -1681,6 +1757,7 @@ test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
+test_self_triggered_restart_refuses_to_attach_to_the_pid_it_termed
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
