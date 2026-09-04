@@ -1429,7 +1429,17 @@ trap 'watcher_signal_exit INT' INT
 trap 'watcher_signal_exit TERM' TERM
 
 WATCH_STEP="lock-acquire"
+# This watcher's own pid, read directly and never through a command substitution:
+# $() forks a subshell whose BASHPID is not this frame's, and fm_lock_claim stores
+# ${BASHPID:-$$} from this same main shell.
+WATCHER_PID=${BASHPID:-$$}
+# Hand the lock primitive what it needs to publish this watcher's identity as part
+# of the claim, so the lock is never observable without it. bin/fm-wake-lib.sh's
+# _fm_lock_publish_watcher_identity owns that publication and the reason it cannot
+# be done afterwards.
+FM_LOCK_WATCHER_PATH="$WATCH_PATH"
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
+  FM_LOCK_WATCHER_PATH=
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
     if [ -e "$BEAT" ]; then
@@ -1448,6 +1458,16 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   fi
   exit 0
 fi
+# The claim is taken, so the primitive needs this no longer: clear it rather than
+# leaving a stale value for any later acquisition to read.
+# shellcheck disable=SC2034 # Read by fm_lock_try_acquire in the separately linted lock owner.
+FM_LOCK_WATCHER_PATH=
+# Published with the claim above, so it is read back rather than recomputed: the
+# delivery record then carries exactly the identity the lock advertises.
+# shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
+FM_WATCH_DELIVERY_PID=$WATCHER_PID
+# shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
+FM_WATCH_DELIVERY_IDENTITY=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
 WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
@@ -1547,17 +1567,6 @@ watcher_cleanup() {
 # is set. watcher_cleanup must not run before this point, because it reads the
 # lock ownership and recovery state that only the lock-acquire path publishes.
 WATCH_LOCK_HELD=1
-WATCH_STEP="lock-publish"
-# This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
-# ${BASHPID:-$$} from this same main shell). Read directly, never via a command
-# substitution, so it matches the stored holder pid for the self-eviction check.
-WATCHER_PID=${BASHPID:-$$}
-printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
-printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
-# shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
-FM_WATCH_DELIVERY_PID=$WATCHER_PID
-FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
-printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 

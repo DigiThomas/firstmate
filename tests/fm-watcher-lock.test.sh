@@ -1313,83 +1313,107 @@ test_arm_retargets_to_a_healthy_lock_successor() {
   pass "arm retargets onto a healthy lock successor instead of restarting over it"
 }
 
-test_arm_waits_out_a_settling_lock_successor() {
-  # The lock-publication window that sits underneath the retarget case above.
-  # fm_lock_claim publishes the lock's pid the instant the claim is taken, and the
-  # claiming watcher writes fm-home, watcher-path and pid-identity only
-  # afterwards, so a healthy successor is briefly observable as a live lock pid
-  # with no identity yet. Reading that one sample as a failed attach made the arm
-  # exec --restart, whose first act is TERM on the current lock pid - the healthy
-  # successor itself. The retarget case cannot reach this: it hands the lock
-  # between twins that already share one published identity, so the successor is
-  # healthy on the very first sample and the publication gap never exists.
-  # The state is built one step at a time here rather than raced with a sleep, and
-  # every intermediate step is either settling or healthy, never a genuine
-  # identity mismatch.
-  local dir state fakebin armout holder successor armpid identity i
-  dir=$(make_case arm-attach-settling)
+test_watch_lock_claim_publishes_the_watcher_identity() {
+  # The claim IS the publication. A reader reaches the watcher lock only through
+  # the symlink fm_lock_try_acquire creates last, so a lock that is visible at all
+  # is a lock whose identity records are already visible with it. No amount of
+  # care by the caller afterwards can provide that: any later write leaves a
+  # stretch in which the lock names a live pid and nothing verifiable, and no
+  # reader can tell that apart from a lock left behind by a dead one.
+  local dir state fakebin holder lock_pid lock_home lock_path lock_identity live_identity i
+  dir=$(make_case watch-lock-claim-publishes)
   state="$dir/state"
   fakebin="$dir/fakebin"
-  armout="$dir/arm.out"
   local -x FM_PROC_ROOT_OVERRIDE="$dir/noproc"
   install_identity_probe "$dir"
-  sleep 300 &
+  # Claim the lock through the production library exactly as bin/fm-watch.sh does,
+  # then stay alive, so the published identity is checked against a live process
+  # rather than against a corpse.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1"; FM_LOCK_WATCHER_PATH="$2"; fm_lock_try_acquire "$3/.watch.lock" || exit 1
+     printf claimed > "$4"; sleep 30' \
+    _ "$LIB" "$WATCH" "$state" "$dir/claimed" &
   holder=$!
-  # A different command line, so the successor's identity genuinely differs from
-  # the holder's and publishing it is a real publication rather than a no-op.
-  sleep 301 &
-  successor=$!
-  seed_watcher_lock_for_pid "$state" "$dir" "$holder"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
-    FM_HEARTBEAT=999999 FM_ARM_ATTACH_VERIFY=6 FM_ARM_CONFIRM_TIMEOUT=5 FM_ARM_ATTACH_POLL=0.1 \
-    FM_ARM_RESTART_MAX=1 "$WATCH_ARM" > "$armout" &
-  armpid=$!
-  wait_for_identity_probe_count "$dir" "$holder" 2 \
-    || fail "arm never entered its verification window on the seeded lock holder"
-  # Unpublish the identity, then move the lock onto the live successor: exactly
-  # what an arm sees while fm_lock_claim has published a pid and the claiming
-  # watcher has not yet written its identity.
-  rm -f "$state/.watch.lock/pid-identity"
-  printf '%s\n' "$successor" > "$state/.watch.lock/pid.next"
-  mv -f "$state/.watch.lock/pid.next" "$state/.watch.lock/pid"
-  # Hold the unpublished state across many in-window polls. The loop breaks out
-  # the moment the arm misbehaves so the assertion reports it immediately.
   i=0
-  while [ "$i" -lt 20 ]; do
-    grep -qE 'watcher: (FAILED|restarting after a failed attach|attach abandoned)' "$armout" 2>/dev/null && break
-    sleep 0.1
+  while [ "$i" -lt 200 ] && [ ! -s "$dir/claimed" ]; do
+    sleep 0.05
     i=$((i + 1))
   done
-  ! grep -qE 'watcher: (FAILED|restarting after a failed attach|attach abandoned)' "$armout" \
-    || fail "arm treated a settling lock successor as a failed attach: $(cat "$armout")"
-  is_live_non_zombie "$successor" || fail "arm killed a lock successor that was merely settling"
-  # Finish the publication. The successor is fully healthy from here, so the arm
-  # must retarget onto it and report a verified attach.
-  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$successor") \
-    || fail "could not identify the settling lock successor"
-  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity.next"
-  mv -f "$state/.watch.lock/pid-identity.next" "$state/.watch.lock/pid-identity"
-  i=0
-  while [ "$i" -lt 200 ]; do
-    grep -qF "watcher: attached pid=$successor" "$armout" 2>/dev/null && break
-    sleep 0.1
-    i=$((i + 1))
-  done
-  grep -qE "watcher: attached pid=$successor \(beacon [0-9]+s, verified [0-9]+s" "$armout" \
-    || fail "arm did not report a verified attach to the settled successor: $(cat "$armout")"
-  ! grep -qF 'watcher: FAILED' "$armout" \
-    || fail "arm reported FAILED over a settling successor: $(cat "$armout")"
-  ! grep -qF 'watcher: restarting after a failed attach' "$armout" \
-    || fail "arm restarted over a settling successor: $(cat "$armout")"
-  ! grep -qF 'watcher: started' "$armout" \
-    || fail "arm started a second watcher behind a settling successor: $(cat "$armout")"
-  is_live_non_zombie "$successor" || fail "arm killed the successor it should have attached to"
-  is_live_non_zombie "$armpid" || fail "arm exited while the successor it attached to was healthy"
-  kill "$armpid" "$holder" "$successor" 2>/dev/null || true
-  wait "$armpid" 2>/dev/null || true
+  [ -s "$dir/claimed" ] || fail "the library never claimed the watcher lock"
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  lock_home=$(cat "$state/.watch.lock/fm-home" 2>/dev/null || true)
+  lock_path=$(cat "$state/.watch.lock/watcher-path" 2>/dev/null || true)
+  lock_identity=$(cat "$state/.watch.lock/pid-identity" 2>/dev/null || true)
+  [ "$lock_pid" = "$holder" ] || fail "the claim recorded pid '$lock_pid', not the claiming process $holder"
+  [ "$lock_home" = "$dir" ] || fail "the claim did not publish this home with the lock: '$lock_home'"
+  [ "$lock_path" = "$WATCH" ] || fail "the claim did not publish the watcher path with the lock: '$lock_path'"
+  [ -n "$lock_identity" ] || fail "the claim published no watcher identity, so a live holder is indistinguishable from a stale one"
+  live_identity=$(FM_STATE_OVERRIDE="$state" PATH="$fakebin:$PATH" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$holder") \
+    || fail "could not identify the live lock holder"
+  [ "$lock_identity" = "$live_identity" ] \
+    || fail "the published identity does not match the live holder: '$lock_identity' vs '$live_identity'"
+  # The records are not merely present: they satisfy the gate every reader uses.
+  touch "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' _ "$LIB" "$state" "$WATCH" "$dir" \
+    || fail "a freshly claimed watcher lock did not read as healthy"
+  kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
-  wait "$successor" 2>/dev/null || true
-  pass "arm waits out a settling lock successor instead of restarting over it"
+  pass "claiming the watcher lock publishes the identity that makes it verifiable"
+}
+
+test_watcher_identity_is_published_under_lock_contention() {
+  # The same guarantee end to end, against the contention that used to set the
+  # width of the gap. The watcher's own start-up work between claiming the lock and
+  # describing itself included two unbounded waits on the wake-queue lock, so the
+  # stretch in which its lock named nothing verifiable was as long as whatever else
+  # held that lock - and bin/fm-wake-drain.sh is entitled to hold it for ten
+  # seconds. Publishing with the claim severs that coupling entirely: this holds
+  # the same lock and asserts the watcher is describable the instant it is visible.
+  local dir state fakebin queue_holder watcher lock_pid lock_identity i
+  dir=$(make_case watch-lock-publish-under-contention)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  FM_HOME="$dir" bash -c \
+    '. "$1"; fm_lock_acquire_wait "$2/.wake-queue.lock" || exit 1
+     printf held > "$3"; sleep "$4"; fm_lock_release "$2/.wake-queue.lock"' \
+    _ "$LIB" "$state" "$dir/queue-held" 4 &
+  queue_holder=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -s "$dir/queue-held" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/queue-held" ] || fail "the fixture never took the wake-queue lock"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" 2> "$dir/watch.err" &
+  watcher=$!
+  # Sample far faster than the contention lasts, and read the identity in the same
+  # breath as the pid, so the assertion is about the first observable state of the
+  # lock rather than about some later settled one.
+  lock_pid=
+  lock_identity=
+  i=0
+  while [ "$i" -lt 400 ]; do
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    if [ -n "$lock_pid" ]; then
+      lock_identity=$(cat "$state/.watch.lock/pid-identity" 2>/dev/null || true)
+      break
+    fi
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -n "$lock_pid" ] || fail "the watcher never claimed its lock: $(cat "$dir/watch.err")"
+  # Proof the sample landed inside the contention rather than after it cleared.
+  [ -e "$state/.wake-queue.lock" ] \
+    || fail "the wake-queue lock was already released, so the sample proves nothing"
+  [ -n "$lock_identity" ] \
+    || fail "the watcher lock was visible with no identity while another process held the wake-queue lock"
+  kill "$watcher" "$queue_holder" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  wait "$queue_holder" 2>/dev/null || true
+  pass "a contended watcher start publishes its identity with its lock, not after it"
 }
 
 test_arm_never_restarts_over_a_healthy_lock_holder() {
@@ -1445,52 +1469,43 @@ test_arm_never_restarts_over_a_healthy_lock_holder() {
   pass "arm abandons an exhausted retarget instead of restarting over the healthy holder"
 }
 
-test_arm_bounds_a_lock_that_never_finishes_settling() {
-  # The settling classification keeps the window polling while a live claimant has
-  # not published its identity yet. That tolerance must still be BOUNDED: a lock
-  # that never finishes publishing has to end in the honest never-published
-  # failure rather than holding the window open forever. The existing settling
-  # case holds its unpublished state for about two seconds inside a seven second
-  # window and so never reaches this deadline at all.
-  local dir state fakebin armout holder successor armpid i
-  dir=$(make_case arm-settling-deadline)
+test_arm_never_stops_a_lock_holder_it_cannot_verify() {
+  # The safety property the deleted settling tolerance used to carry. With the
+  # identity published at claim time no watcher can produce an unverifiable lock,
+  # so this state is unreachable from bin/fm-watch.sh - but a lock the arm cannot
+  # verify must still never become a lock the arm terminates, because the arm has
+  # no evidence about what that process is. --restart declines to signal a holder
+  # whose lock does not identify it as this home's watcher, and only says so.
+  local dir state fakebin out holder armpid i
+  dir=$(make_case arm-unverifiable-holder)
   state="$dir/state"
   fakebin="$dir/fakebin"
-  armout="$dir/arm.out"
+  out="$dir/restart.out"
   local -x FM_PROC_ROOT_OVERRIDE="$dir/noproc"
   install_identity_probe "$dir"
   sleep 300 &
   holder=$!
-  sleep 301 &
-  successor=$!
   seed_watcher_lock_for_pid "$state" "$dir" "$holder"
-  # A short window, so the deadline is reached well inside the case's own budget.
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
-    FM_HEARTBEAT=999999 FM_ARM_ATTACH_VERIFY=2 FM_ARM_CONFIRM_TIMEOUT=5 FM_ARM_ATTACH_POLL=0.1 \
-    FM_ARM_RESTART_MAX=0 "$WATCH_ARM" > "$armout" &
-  armpid=$!
-  wait_for_identity_probe_count "$dir" "$holder" 2 \
-    || fail "arm never entered its verification window on the seeded lock holder"
-  # Move onto a live successor and never publish its identity, so the lock stays
-  # settling for the whole remaining window and past its deadline.
+  # Strip the identity, leaving a live pid the arm has no way to vouch for.
   rm -f "$state/.watch.lock/pid-identity"
-  printf '%s\n' "$successor" > "$state/.watch.lock/pid.next"
-  mv -f "$state/.watch.lock/pid.next" "$state/.watch.lock/pid"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=2 FM_ARM_RESTART_DEPTH=1 \
+    "$WATCH_ARM" --restart > "$out" 2>/dev/null &
+  armpid=$!
   i=0
-  while [ "$i" -lt 300 ]; do
-    grep -qF 'never finished publishing' "$armout" 2>/dev/null && break
+  while [ "$i" -lt "$ARM_FAIL_EXIT_POLLS" ]; do
+    is_live_non_zombie "$armpid" || break
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF 'never finished publishing' "$armout" \
-    || fail "arm never bounded a lock that stayed unpublished past its settling deadline: $(cat "$armout")"
-  is_live_non_zombie "$successor" \
-    || fail "arm killed the unpublished lock holder instead of reporting the bound"
-  kill "$armpid" "$holder" "$successor" 2>/dev/null || true
+  is_live_non_zombie "$holder" \
+    || fail "restart terminated a lock holder it could not identify as this home's watcher: $(cat "$out")"
+  ! grep -qF "watcher: attached pid=$holder" "$out" \
+    || fail "arm claimed a verified attach to a holder with no published identity: $(cat "$out")"
+  kill "$armpid" "$holder" 2>/dev/null || true
   wait "$armpid" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
-  wait "$successor" 2>/dev/null || true
-  pass "arm bounds a lock that never finishes settling instead of polling forever"
+  pass "arm leaves a lock holder it cannot verify running instead of stopping it"
 }
 
 test_attached_arm_bounds_repeated_replacement_verification_failures() {
@@ -2035,8 +2050,9 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_arm_refuses_to_attach_to_a_dying_watcher
 test_arm_retargets_to_a_healthy_lock_successor
 test_arm_never_restarts_over_a_healthy_lock_holder
-test_arm_waits_out_a_settling_lock_successor
-test_arm_bounds_a_lock_that_never_finishes_settling
+test_watch_lock_claim_publishes_the_watcher_identity
+test_watcher_identity_is_published_under_lock_contention
+test_arm_never_stops_a_lock_holder_it_cannot_verify
 test_attached_arm_bounds_repeated_replacement_verification_failures
 test_nonzero_watcher_exit_reports_an_actionable_reason
 test_cycle_exit_ledger_links_successor_and_stays_bounded

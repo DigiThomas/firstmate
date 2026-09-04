@@ -513,24 +513,49 @@ Against the current scripts the dying target is never announced and the arm rest
 The retarget case additionally asserts that the retargeted line carries its verification window, because an arm that simply never restarts satisfies every other assertion in it and the case would otherwise stop discriminating.
 The lock-refusal case additionally shows the arm naming `watcher cycle exited 1 during lock-acquire` on stdout while replaying the watcher's own `heartbeat is stale` explanation on stderr.
 
-A fifth case covers the lock-publication window that sits underneath the retarget case, and was verified on 2026-09-03 on the same host against the arm as it stood before the settling classification was added:
-
-```text
-ok - arm waits out a settling lock successor instead of restarting over it
-```
-
-Against that earlier arm the case fails with `not ok - arm treated a settling lock successor as a failed attach: watcher: restarting after a failed attach - attach target pid=<N> stopped verifying as this home's live watcher within 6s (pid alive, beacon 0s)`, which is the harm itself: the lock pid was alive and the arm restarted over it anyway, and `--restart` opens by sending TERM to exactly that pid.
-The retarget case cannot reach this state, because it hands the lock between two holders that already share one published identity, so its successor is healthy on the first sample and the publication gap never exists.
-
-Two further cases were added on 2026-09-04 after an independent adversarial review reproduced a healthy-watcher kill on this same branch, verified on the same host and each first run against the branch as it stood before this fix:
+A further case was added on 2026-09-04 after an independent adversarial review reproduced a healthy-watcher kill on this same branch, verified on the same host and first run against the branch as it stood before this fix:
 
 ```text
 ok - arm abandons an exhausted retarget instead of restarting over the healthy holder
-ok - arm bounds a lock that never finishes settling instead of polling forever
 ```
 
 The review's own reproduction, three lock handovers inside one verification window against live identity-matched holders, moved from `FINAL-HOLDER-SIGNALLED` three times out of three before the fix to `FINAL-HOLDER-ALIVE` three times out of three after it, with every holder surviving.
-Mutation testing pins these cases to behavior rather than to output text: an `attach_verified` that returns immediately, a retarget budget that never exhausts, a settling deadline that never fires, and a watcher that never publishes its terminal delivery record are each failed by the case that covers them.
+Mutation testing pins these cases to behavior rather than to output text: an `attach_verified` that returns immediately, a retarget budget that never exhausts, and a watcher that never publishes its terminal delivery record are each failed by the case that covers them.
+
+### 2026-09-04 - watcher lock identity published with the claim
+
+The watcher's `fm-home`, `watcher-path`, and `pid-identity` records are written into the lock's owner directory before the symlink that publishes the lock exists, so no reader can observe a claim without them.
+Verified on macOS 26.6 (Darwin 25.6.0), GNU bash 3.2.57, ShellCheck 0.11.0.
+
+The gap this removes was previously as wide as whatever else held the wake-queue lock, because the watcher's start-up path took two unbounded waits on it between claiming the lock and describing itself.
+Measured by holding `state/.wake-queue.lock` through the production library for a fixed time, launching a real `bin/fm-watch.sh`, and timing `state/.watch.lock/pid` to `state/.watch.lock/pid-identity`:
+
+```text
+lock held   before    after
+0s          0.102s    0.000s
+1s          -         0.000s
+2s          2.015s    0.000s
+4s          -         0.000s
+6s          -         0.000s
+10s         9.983s    0.000s
+```
+
+Three cases carry the guarantee, each also run against the pre-change scripts to confirm it fails there:
+
+```text
+ok - claiming the watcher lock publishes the identity that makes it verifiable
+ok - a contended watcher start publishes its identity with its lock, not after it
+ok - arm leaves a lock holder it cannot verify running instead of stopping it
+```
+
+The first two fail against the pre-change scripts with `not ok - the claim did not publish this home with the lock: ''` and `not ok - the watcher lock was visible with no identity while another process held the wake-queue lock`.
+The third also passes there, because it pins the safety property the removed settling tolerance used to carry rather than a behavior change; it is pinned by mutation instead, and neutralising the restart path's holder-identity check fails it with `not ok - restart terminated a lock holder it could not identify as this home's watcher`.
+Neutralising the claim-time publication fails the first two the same way the pre-change scripts do.
+`ok - restart still replaces a wedged watcher whose beacon has gone stale` passes three times out of three after the change, and the health predicate and the liveness beacon are untouched by it.
+
+```text
+bin/fm-test-run.sh tests/fm-watcher-lock.test.sh   -> 44 ok, 0 not ok, exit 0
+```
 
 The phase names in that line come from `WATCH_STEP` assignments that cover every phase of the poll loop, including the phases added upstream since this change was first written (`secondmate-wake-stall`, `procevent-tick`, `downtime-resurface`, and `inactive-outcome-scan`), so a cycle that exits inside one of them is still reportable from its failure line alone.
 
