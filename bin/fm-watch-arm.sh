@@ -797,11 +797,36 @@ fi
 # So the arm must never treat such a pid as an attach candidate: it is not merely
 # unverified, it is a process this arm has already told to die.
 RESTART_TERMED_PID=
+# Set when the restart declined to signal a currently-healthy holder, so the arm
+# follows that watcher instead of starting a second one behind it.
+RESTART_DECLINED_HEALTHY=0
 if [ "$mode" = restart ]; then
-  # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
+  # Home-scoped stop: only the watcher pid recorded in THIS home's lock, re-read
+  # HERE rather than carried from any earlier observation. A healthy successor can
+  # claim the lock between a verification failing and this restart executing, and
+  # signalling a pid decided before that point would terminate a watcher this
+  # process never looked at.
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   if fm_pid_alive "$lock_pid"; then
     if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
+      # Belt and braces, and the single owner of the rule: never signal a process
+      # that is healthy AT THE MOMENT OF SIGNALLING. Guards keyed on having
+      # OBSERVED a holder as healthy leave a hole for every path that reaches the
+      # TERM without that observation, and each such hole is another way to kill
+      # a running watcher. This is keyed on current state instead, so it closes
+      # them as a class rather than one at a time.
+      # This does not strand a wedged watcher: fm_watcher_healthy also requires
+      # the liveness beacon to be fresh within FM_GUARD_GRACE, and only the
+      # watcher process touches that beacon, on every poll. A wedged watcher stops
+      # beating and stops satisfying the predicate, so it remains replaceable.
+      if healthy_watcher && [ "$HEALTHY_PID" = "$lock_pid" ]; then
+        # Non-terminal, and deliberately not matching the adapters' readiness
+        # pattern `^watcher: (started|attached)`: the terminal line is the
+        # attached one this arm goes on to print for that same healthy watcher.
+        echo "watcher: restart declined - pid=$lock_pid holds the lock and is healthy right now, so it was not signalled"
+        cycle_log_append unknown unknown restart-declined-healthy-holder none
+        RESTART_DECLINED_HEALTHY=1
+      else
       kill -TERM "$lock_pid" 2>/dev/null || true
       # Wait for it to actually exit before relaunching, so the fresh watcher
       # either takes a released lock or reclaims a now-dead-pid stale lock instead
@@ -818,6 +843,7 @@ if [ "$mode" = restart ]; then
       # pid it is about to re-verify is one it has just told to die.
       if [ "$ARM_RESTART_DEPTH" -gt 0 ] && fm_pid_alive "$lock_pid"; then
         RESTART_TERMED_PID=$lock_pid
+      fi
       fi
     else
       if ! clear_stale_recorded_watcher_lock; then
@@ -837,13 +863,21 @@ fi
 # cannot see the danger: the deferred-trap window is bounded by FM_POLL and is
 # strictly longer than the verification window, so the pid passes every sample
 # and the arm announces a verified attach to a process it has itself doomed.
-if [ -n "$RESTART_TERMED_PID" ]; then
+# Scoped to THAT pid. A different holder that is healthy now is a legitimate
+# successor and must still be attachable; only the process this arm signalled is
+# disqualified. The signal-time check above already declines to signal a healthy
+# holder, so this fires for the narrower case where the holder was not healthy
+# when it was signalled and is beaconing again by the time the arm falls through.
+if [ -n "$RESTART_TERMED_PID" ] && healthy_watcher && [ "$HEALTHY_PID" = "$RESTART_TERMED_PID" ]; then
   cycle_log_append 1 none restart-target-still-exiting none
   echo "watcher: FAILED - the watcher this restart stopped (pid=$RESTART_TERMED_PID) had not exited yet, so no attach was claimed ($(no_fresh_watcher_detail), queued wakes: $(queued_wake_count))"
   exit 1
 fi
 
-if [ "$mode" = arm ] && healthy_watcher; then
+# A restart that declined to signal a healthy holder follows that watcher rather
+# than starting a second one behind it: supervision is already running, and the
+# whole point of declining was that killing it would be the harm.
+if { [ "$mode" = arm ] || [ "$RESTART_DECLINED_HEALTHY" -eq 1 ]; } && healthy_watcher; then
   attach_candidate=$HEALTHY_PID
   # Captured before attach_verified re-reads the lock, so the abandoned-attach
   # cycle is still recorded against the identity this arm actually saw.

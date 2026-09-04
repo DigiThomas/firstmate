@@ -509,13 +509,18 @@ test_self_triggered_restart_refuses_to_attach_to_the_pid_it_termed() {
   # test_watch_restart_attaches_to_healthy_peer in exactly one variable,
   # FM_ARM_RESTART_DEPTH, and asserts the opposite outcome. An operator restart
   # must still attach; a restart the arm chose for itself must not.
-  local dir state fakebin out peer_ready peer identity armpid status i
+  local dir state fakebin out peer_ready peer_termed peer identity armpid status i
   dir=$(make_case restart-self-triggered-termed)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
   peer_ready="$dir/peer.ready"
-  node -e 'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$peer_ready" &
+  # The peer records the moment it is signalled, so the fixture can refresh the
+  # beacon strictly AFTER the stop is issued rather than racing it. It ignores
+  # the signal otherwise, which is the deterministic stand-in for a watcher whose
+  # handler is deferred behind its current foreground wait.
+  peer_termed="$dir/peer.termed"
+  node -e 'const fs = require("node:fs"); const t = process.argv[2]; process.on("SIGTERM", () => { try { fs.writeFileSync(t, "1"); } catch (e) {} }); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$peer_ready" "$peer_termed" &
   peer=$!
   i=0
   while [ "$i" -lt 50 ] && [ ! -s "$peer_ready" ]; do
@@ -534,9 +539,12 @@ test_self_triggered_restart_refuses_to_attach_to_the_pid_it_termed() {
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
-  # A fresh beacon, so the holder passes the health gate on every sample. What
-  # must stop the attach is the guard, not a stale beacon.
-  touch "$state/.last-watcher-beat"
+  # A STALE beacon at signal time, so the signal-time healthy check permits the
+  # stop and this case still reaches the guard it exists to pin. The beacon is
+  # refreshed below once the stop has been issued, which is what a watcher whose
+  # TERM handler is deferred actually does: it keeps running its poll loop, and
+  # keeps beating, until its current foreground wait returns.
+  touch -t 200001010000 "$state/.last-watcher-beat"
   # Backgrounded deliberately. An arm WITHOUT the guard does not exit here: it
   # falls through and blocks in its attached poll, so a foreground run would hang
   # to the harness timeout and report a fixture failure instead of the forbidden
@@ -546,14 +554,26 @@ test_self_triggered_restart_refuses_to_attach_to_the_pid_it_termed() {
     FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 \
     FM_ARM_RESTART_DEPTH=1 "$WATCH_ARM" --restart > "$out" 2>/dev/null &
   armpid=$!
+  # Wait for the stop to actually be issued, then refresh the beacon so the
+  # signalled peer reads healthy again at fall-through. Ordering by the peer's own
+  # signal receipt makes this caused rather than timed: refreshing earlier would
+  # make the signal-time check decline and the case would never reach the guard.
   i=0
-  while [ "$i" -lt "$ARM_FAIL_EXIT_POLLS" ]; do
-    grep -qE 'watcher: (attached|FAILED)' "$out" 2>/dev/null && break
+  while [ "$i" -lt "$ARM_FAIL_EXIT_POLLS" ] && [ ! -s "$peer_termed" ]; do
     is_live_non_zombie "$armpid" || break
     sleep 0.1
     i=$((i + 1))
   done
-  is_live_non_zombie "$peer" || fail "fixture peer did not survive the restart's TERM"
+  [ -s "$peer_termed" ] || fail "restart never issued its stop, so the guard was never reached: $(cat "$out")"
+  i=0
+  while [ "$i" -lt "$ARM_FAIL_EXIT_POLLS" ]; do
+    grep -qE 'watcher: (attached|FAILED)' "$out" 2>/dev/null && break
+    is_live_non_zombie "$armpid" || break
+    touch "$state/.last-watcher-beat"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$peer" || fail "fixture peer did not survive the restart's stop"
   ! grep -qF 'watcher: attached' "$out" \
     || fail "self-triggered restart attached to the pid it had just TERMed: $(cat "$out")"
   grep -qF "no attach was claimed" "$out" \
@@ -569,6 +589,104 @@ test_self_triggered_restart_refuses_to_attach_to_the_pid_it_termed() {
   kill -KILL "$peer" 2>/dev/null || true
   wait "$peer" 2>/dev/null || true
   pass "a self-triggered restart refuses to attach to the watcher it just terminated"
+}
+
+test_restart_never_signals_a_holder_that_is_healthy_at_signal_time() {
+  # The third instance of one defect: the arm terminating a watcher that is
+  # healthy right now. The first two guards were keyed on having OBSERVED a
+  # holder as healthy, so any path reaching the stop without that observation
+  # stayed a hole. Here a healthy successor claims the lock in the window between
+  # a verification failing and the restart executing, so no observation exists and
+  # those guards are silent. The check that closes the class is keyed on CURRENT
+  # state: re-read the lock immediately before signalling and refuse if that pid
+  # is healthy then.
+  local dir state fakebin out successor identity armpid i
+  dir=$(make_case restart-healthy-at-signal-time)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/restart.out"
+  local -x FM_PROC_ROOT_OVERRIDE="$dir/noproc"
+  install_identity_probe "$dir"
+  sleep 300 &
+  successor=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$successor") \
+    || fail "could not identify the successor"
+  # The lock already names the healthy successor when the restart runs, which is
+  # the state that window leaves behind. A restart carrying a decision made before
+  # that claim must not act on it.
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$successor" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 FM_ARM_ATTACH_VERIFY=1 FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=2 \
+    FM_ARM_RESTART_DEPTH=1 "$WATCH_ARM" --restart > "$out" &
+  armpid=$!
+  # Wait for a TERMINAL line. The declined line is non-terminal and appears
+  # immediately, so breaking on it would assert the follow-through before the arm
+  # has had a chance to produce it.
+  i=0
+  while [ "$i" -lt 300 ]; do
+    grep -qE 'watcher: (attached|FAILED)' "$out" 2>/dev/null && break
+    is_live_non_zombie "$armpid" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$successor" \
+    || fail "restart stopped a lock holder that was healthy at the moment of signalling: $(cat "$out")"
+  grep -qF 'restart declined' "$out" \
+    || fail "restart did not report declining to signal the healthy holder: $(cat "$out")"
+  grep -qF "watcher: attached pid=$successor" "$out" \
+    || fail "restart declined to signal the healthy holder but then did not follow it: $(cat "$out")"
+  kill "$armpid" "$successor" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  wait "$successor" 2>/dev/null || true
+  pass "restart never signals a lock holder that is healthy at the moment of signalling"
+}
+
+test_restart_still_replaces_a_wedged_watcher() {
+  # The hazard the signal-time check must not create. A watcher that is wedged -
+  # process alive and identity-matched, but no longer advancing its liveness
+  # beacon - must stay replaceable, because refusing to act on it would strand
+  # supervision, a quieter and worse failure than the kill being prevented.
+  # fm_watcher_healthy requires the beacon fresh within FM_GUARD_GRACE, and only
+  # the watcher touches that beacon, so a wedged holder fails the predicate and is
+  # replaced normally. This pins that distinction.
+  local dir state fakebin out wedged identity i
+  dir=$(make_case restart-replaces-wedged)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/restart.out"
+  local -x FM_PROC_ROOT_OVERRIDE="$dir/noproc"
+  install_identity_probe "$dir"
+  sleep 300 &
+  wedged=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$wedged") \
+    || fail "could not identify the wedged holder"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$wedged" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  # A stale beacon is exactly what a wedge looks like from outside.
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=2 \
+    FM_ARM_RESTART_DEPTH=1 "$WATCH_ARM" --restart > "$out" 2>/dev/null &
+  i=0
+  while [ "$i" -lt 200 ]; do
+    is_live_non_zombie "$wedged" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! is_live_non_zombie "$wedged" \
+    || fail "restart refused to replace a wedged watcher, stranding supervision: $(cat "$out")"
+  ! grep -qF 'restart declined' "$out" \
+    || fail "restart treated a wedged watcher as healthy and declined to replace it: $(cat "$out")"
+  wait "$wedged" 2>/dev/null || true
+  pass "restart still replaces a wedged watcher whose beacon has gone stale"
 }
 
 test_watcher_self_evicts_on_lock_takeover() {
@@ -1825,6 +1943,8 @@ test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_self_triggered_restart_refuses_to_attach_to_the_pid_it_termed
+test_restart_never_signals_a_holder_that_is_healthy_at_signal_time
+test_restart_still_replaces_a_wedged_watcher
 test_watcher_self_evicts_on_lock_takeover
 test_arm_self_eviction_is_loud_without_successor
 test_arm_attaches_and_waits_for_live_fresh_watcher
